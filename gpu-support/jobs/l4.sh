@@ -1,6 +1,6 @@
-# First GPU run, on an L4: the small reference on the real GPU, the card's
-# allocatable memory, and GPT-2 124M (random weights, T=1024) at B=4 and B=5.
-# A 24 GiB machine file admits both; B=5 needs 25.05 GB.
+# The L4 run: the small reference and training loop on the real GPU against
+# llm.c, the card's allocatable memory, and GPT-2 124M (random weights, T=1024)
+# at B=4 and B=5. A 24 GiB machine file admits both; B=5 needs 25.05 GB.
 set -x
 OUT=/workspace/out
 VX_DISPATCH_VERBOSE=1 $VXC ref/test_gpu_small.vx --machine machines/dev.vx -O3 > $OUT/test_gpu_small.log 2>&1

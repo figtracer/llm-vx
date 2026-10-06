@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / 'results/runs'
+OUT = ROOT / 'build/runs'
 SKIP = {'.git', 'Vx', 'llm.c', 'build', 'data', 'results'}
 SUBMODULES = {'Vx': 'https://github.com/vx-lang/Vx', 'llm.c': 'https://github.com/karpathy/llm.c'}
 

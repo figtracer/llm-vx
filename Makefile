@@ -3,7 +3,7 @@ VXC := Vx/target/release/vxc
 VXENV := source Vx/config.local && export VX_STD_PATH=$(CURDIR)/Vx/stdlib/std:$(CURDIR)/Vx/stdlib &&
 SHELL := /bin/bash
 
-.PHONY: test ref train train-check gpu-test gpu-train-check clean
+.PHONY: test ref train train-check gpu-test gpu-train-check admit clean
 
 test: build/ref_model.bin
 	$(VXENV) $(VXC) test_gpt2.vx -O3
@@ -50,6 +50,11 @@ gpu-train-check: train-check
 	$(CC) -O2 $(SHIM_FLAGS) -c gpu-support/shim.c -o build/shim.o
 	$(VXENV) VX_SHIM=$(CURDIR)/build/shim.o CLANG_PATH=$(CURDIR)/gpu-support/clang-link.sh $(VXC) ref/train_gpu_small.vx --machine $(MACHINE) -O3 2>/dev/null | grep -v '^\[' > build/vx_gpu_train.txt
 	python3 ref/compare_train.py build/llmc_train.txt build/vx_gpu_train.txt --tol 0.001
+
+# The largest GPT-2 124M batch at T=1024 that fits each GPU, from the compiler
+# alone. Writes results/admission_t1024.json.
+admit:
+	python3 gpu-support/admit.py 1024
 
 clean:
 	rm -rf build
