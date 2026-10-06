@@ -86,6 +86,8 @@ log sources
 cd /workspace/llm-vx
 if [ -f submodules.txt ]; then
   while read -r dir url sha; do
+    # A rerun on the same sandbox keeps the checkout, and with it Vx's build.
+    [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" = "$sha" ] && continue
     rm -rf "$dir"
     git init -q "$dir"
     git -C "$dir" fetch -q --depth 1 "$url" "$sha"
