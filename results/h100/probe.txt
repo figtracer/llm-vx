@@ -1,0 +1,1 @@
+PROBE {"nvidia_smi": "NVIDIA H100 80GB HBM3, 81559, 580.95.05", "smi_total_bytes": 85520809984, "cuda_total_bytes": 85017624576, "free_after_context_bytes": 84465221632, "largest_single_bytes": 84462796800, "fillable_bytes": 84462796800, "free_after_fill_bytes": 2424832}
