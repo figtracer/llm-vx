@@ -16,8 +16,11 @@ ROOT = Path(__file__).resolve().parent.parent
 VXC = ROOT / 'Vx/target/release/vxc'
 BUILD = ROOT / 'build/admit'
 
-# name: (fleet file, declared capacity, allocatable bytes measured by vx-fit)
+# name: (fleet file, declared capacity, allocatable bytes measured by vx-fit;
+# the L4's by gpu-support/probe.py on the L4 llm.vx ran on). Vx has no L4 fleet
+# file; 24 GiB is the card's marketed 24 GB read as binary.
 GPUS = {
+    'L4': (None, '24 GiB', 23452450816),
     'A100-40GB': ('a100-40', '40 GiB', 41959817216),
     'A100-80GB': ('a100-80', '80 GiB', None),
     'H100': ('h100-sxm', '80 GiB', 84460699648),

@@ -1,5 +1,12 @@
 [
  {
+  "gpu": "L4",
+  "declared": "24 GiB",
+  "largest_batch_declared": 5,
+  "allocatable_bytes": 23452450816,
+  "largest_batch_allocatable": 4
+ },
+ {
   "gpu": "A100-40GB",
   "declared": "40 GiB",
   "largest_batch_declared": 8,

@@ -1,0 +1,18 @@
+[flat-codegen] emitted module via the flat path
+LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is not a file.
+
+[JIT] Translating to LLVM IR...
+[JIT] Optimizing LLVM IR (-O3)...
+[JIT] Compiling to native object (-O3)...
+[JIT] Linking native executable...
+[JIT] Executing native binary...
+[JIT] Program was killed by signal 6 (SIGABRT, often a failed assert)
+[GPT-2 on GPU, train]
+
+[JIT] Error output:
+[Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
+  Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
+  Declare the space `managed: explicit` and the compiler will require the transfer home, or keep the operands in a space the host can read.
+[Vx CUDA] FATAL: cudaMalloc(&device_ptr, bytes) failed: out of memory
+
+Program was killed by signal 6 (SIGABRT, often a failed assert)

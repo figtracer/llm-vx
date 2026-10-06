@@ -1,0 +1,1 @@
+PROBE {"nvidia_smi": "NVIDIA L4, 23034, 580.95.05", "smi_total_bytes": 24152899584, "cuda_total_bytes": 23659151360, "free_after_context_bytes": 23455727616, "largest_single_bytes": 23452450816, "fillable_bytes": 23452450816, "free_after_fill_bytes": 3276800}
