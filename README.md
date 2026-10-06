@@ -87,26 +87,30 @@ quote.
 
 ## How the GPU program is written
 
-Vx runs a `spawn` loop in parallel only when every write is indexed by the loop variable, so each
-tensor is 2-D (rows, columns) in llm.c's memory order and each kernel computes one row per GPU
-thread. A kernel that updates one layer covers the whole tensor and skips the other rows. Matrix
+Vx runs a `spawn` loop in parallel only when every write is indexed by the loop variable; an offset
+makes it one thread ([Vx#1309](https://github.com/vx-lang/Vx/issues/1309)). So each tensor is 2-D
+(rows, columns) in llm.c's memory order and each kernel computes one row per GPU thread. A kernel that updates one layer covers the whole tensor and skips the other rows. Matrix
 multiplications call cuBLAS, as llm.c's fp32 CUDA version does. Attention backward gathers instead
 of scattering, because Vx has no atomics.
 
 ## Limits and workarounds
 
-- **Speed.** The GPU program is correct, but not yet fast. The runs above took 24 s per step on both
-  cards: B=4 on the L4 and B=17 on the H100. By count, most of that was one loop from llm.c's CPU
-  code: softmax backward summed an O(T^2) expression for every row, about T^3/3 multiply-adds per
-  attention head, or 200 billion per step. It now uses the O(T) form from llm.c's CUDA version, and dquery, dkey and dvalue
-  run one thread per head and position. A run on the GPU with this change is still to come.
-- **Machine files.** The program uses the built-in `Topology::GPU` and `Memory::GPU_HBM`: Vx's CUDA
-  runtime sends only built-in topologies to a device, so the fleet files' `Topology Device` would
-  run on the host. `machines/*.vx` give `GPU_HBM` its capacity, `within: Memory::CPU_DRAM` (kernels
-  cannot take host scalars otherwise, Vx#850) and `managed: cached` (Vx refuses non-matmul kernels
-  on explicitly managed memory).
+- **Speed.** The GPU program is correct, but not yet fast. The first version took 24 s per step on
+  both cards (B=4 on the L4, B=17 on the H100), mostly in one loop from llm.c's CPU code: softmax
+  backward summed an O(T^2) expression for every row, about 200 billion multiply-adds per step. It
+  now uses the O(T) form from llm.c's CUDA version, and dquery, dkey and dvalue run one thread per
+  head and position. On the L4 a step now takes 4.4 s, with the same losses to every digit
+  (`results/l4-attention/`). Attention is still 3.6 s of it: 1.6 s forward, 1.95 s backward.
+- **Machine files.** The program uses the built-in `Topology::GPU` and `Memory::GPU_HBM`. Vx's CUDA
+  runtime allocates the memory of a machine-file topology on the host
+  ([Vx#1308](https://github.com/vx-lang/Vx/issues/1308)), so the fleet files' `Topology Device` would
+  hand GPU kernels host pointers. `machines/*.vx` give `GPU_HBM` its capacity,
+  `within: Memory::CPU_DRAM` (otherwise kernels cannot take host scalars or tensor references,
+  [Vx#850](https://github.com/vx-lang/Vx/issues/850)) and `managed: cached` (Vx refuses non-matmul
+  kernels on explicitly managed memory).
 - **Shapes.** Tensor extents must be generic parameters: module constants cannot size a tensor, and
-  `[R * C]` does not match a parameter `[N]`. `train_gpu.vx` therefore takes 16 shape parameters.
+  `[R * C]` does not match a parameter `[N]` ([Vx#1310](https://github.com/vx-lang/Vx/issues/1310)).
+  `train_gpu.vx` therefore takes 16 shape parameters.
 - **C shim.** `gpu-support/shim.c` offsets device pointers for cuBLAS (Vx has no pointer
   arithmetic) and copies batches in and losses out. `CLANG_PATH` links it, since `vxc` has no flag
   for extra objects.

@@ -1,0 +1,188 @@
+== 17:07:28 machine
+1
+MemTotal:       171050868 kB
+none            8.0E  108K  8.0E   1% /
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+NVIDIA L4, 23034 MiB, 610.57.04, 8.9
+== 17:07:28 apt
+== 17:08:02 llvm 22
++ CURRENT_LLVM_STABLE=22
++ BASE_URL=https://apt.llvm.org
++ NEW_DEBIAN_DISTROS=("trixie" "forky" "unstable")
++ LLVM_VERSION=22
++ ALL=0
+++ lsb_release -is
++ DISTRO=Debian
+++ lsb_release -cs
++ VERSION_CODENAME=trixie
+++ lsb_release -sr
++ VERSION=13
++ UBUNTU_CODENAME=
++ CODENAME_FROM_ARGUMENTS=
++ source /etc/os-release
+++ PRETTY_NAME='Debian GNU/Linux 13 (trixie)'
+++ NAME='Debian GNU/Linux'
+++ VERSION_ID=13
+++ VERSION='13 (trixie)'
+++ VERSION_CODENAME=trixie
+++ DEBIAN_VERSION_FULL=13.3
+++ ID=debian
+++ HOME_URL=https://www.debian.org/
+++ SUPPORT_URL=https://www.debian.org/support
+++ BUG_REPORT_URL=https://bugs.debian.org/
++ DISTRO=debian
++ is_new_debian=0
++ [[ debian == \d\e\b\i\a\n ]]
++ for new_distro in "${NEW_DEBIAN_DISTROS[@]}"
++ [[ trixie == \t\r\i\x\i\e ]]
++ is_new_debian=1
++ break
++ needed_binaries=(lsb_release wget gpg)
++ [[ 1 -eq 0 ]]
++ missing_binaries=()
++ for binary in "${needed_binaries[@]}"
++ command -v lsb_release
++ for binary in "${needed_binaries[@]}"
++ command -v wget
++ for binary in "${needed_binaries[@]}"
++ command -v gpg
++ [[ 0 -gt 0 ]]
++ case ${DISTRO} in
++ [[ 13 (trixie) == \u\n\s\t\a\b\l\e ]]
++ [[ 13 (trixie) == \t\e\s\t\i\n\g ]]
++ [[ trixie == \f\o\r\k\y ]]
++ CODENAME=trixie
++ LINKNAME=-trixie
++ for arg in "$@"
++ case "${arg}" in
++ '[' 1 -ge 1 ']'
++ '[' 2 '!=' - ']'
++ '[' 22 '!=' all ']'
++ LLVM_VERSION=22
++ OPTIND=2
++ '[' 1 -ge 2 ']'
++ getopts :hm:n: arg
++ [[ 0 -ne 0 ]]
++ declare -A LLVM_VERSION_PATTERNS
++ LLVM_VERSION_PATTERNS[9]=-9
++ LLVM_VERSION_PATTERNS[10]=-10
++ LLVM_VERSION_PATTERNS[11]=-11
++ LLVM_VERSION_PATTERNS[12]=-12
++ LLVM_VERSION_PATTERNS[13]=-13
++ LLVM_VERSION_PATTERNS[14]=-14
++ LLVM_VERSION_PATTERNS[15]=-15
++ LLVM_VERSION_PATTERNS[16]=-16
++ LLVM_VERSION_PATTERNS[17]=-17
++ LLVM_VERSION_PATTERNS[18]=-18
++ LLVM_VERSION_PATTERNS[19]=-19
++ LLVM_VERSION_PATTERNS[20]=-20
++ LLVM_VERSION_PATTERNS[21]=-21
++ LLVM_VERSION_PATTERNS[22]=-22
++ LLVM_VERSION_PATTERNS[23]=-23
++ LLVM_VERSION_PATTERNS[24]=
++ '[' '!' _ ']'
++ LLVM_VERSION_STRING=-22
++ [[ -n trixie ]]
++ REPO_NAME='deb https://apt.llvm.org/trixie/  llvm-toolchain-trixie-22 main'
++ check_url https://apt.llvm.org/trixie/
++ local url=https://apt.llvm.org/trixie/
++ command -v wget
++ wget -q --method=HEAD --timeout=15 --tries=3 https://apt.llvm.org/trixie/
++ [[ ! -f /etc/apt/trusted.gpg.d/apt.llvm.org.asc ]]
++ GPG_KEY_URL=https://apt.llvm.org/llvm-snapshot.gpg.key
++ check_url https://apt.llvm.org/llvm-snapshot.gpg.key
++ local url=https://apt.llvm.org/llvm-snapshot.gpg.key
++ command -v wget
++ wget -q --method=HEAD --timeout=15 --tries=3 https://apt.llvm.org/llvm-snapshot.gpg.key
++ download_key https://apt.llvm.org/llvm-snapshot.gpg.key
++ local url=https://apt.llvm.org/llvm-snapshot.gpg.key
++ command -v wget
++ wget -qO- --retry-connrefused --waitretry=1 --tries=3 https://apt.llvm.org/llvm-snapshot.gpg.key
++ tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+++ apt-key list
+++ grep -i llvm
++ [[ -z '' ]]
++ apt-key del AF4F7421
+/tmp/llvm.sh: line 236: apt-key: command not found
++ true
++ [[ trixie == \b\o\o\k\w\o\r\m ]]
++ [[ 1 -eq 1 ]]
++ SOURCES_FILE=/etc/apt/sources.list.d/http_apt_llvm_org_trixie_-trixie.sources
++ TEXT_TO_ADD='Types: deb
+Architectures: amd64 arm64
+Signed-By: /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+URIs: https://apt.llvm.org/trixie/
+Suites: llvm-toolchain-trixie-22
+Components: main'
++ echo 'Types: deb
+Architectures: amd64 arm64
+Signed-By: /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+URIs: https://apt.llvm.org/trixie/
+Suites: llvm-toolchain-trixie-22
+Components: main'
++ tee -a /etc/apt/sources.list.d/http_apt_llvm_org_trixie_-trixie.sources
++ apt-get update
++ PKG='clang-22 lldb-22 lld-22 clangd-22'
++ [[ 0 -eq 1 ]]
++ apt-get install -y clang-22 lldb-22 lld-22 clangd-22
+== 17:08:33 cuda
+== 17:08:47 rust
+info: downloading installer
+info: profile set to minimal
+info: default host tuple is x86_64-unknown-linux-gnu
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+info: latest update on 2026-10-01 for version 1.99.0 (b940084d7 2026-09-28)
+info: downloading 3 components
+info: default toolchain set to stable-x86_64-unknown-linux-gnu
+== 17:08:56 sources
+== 17:09:00 build vx
+    Finished `release` profile [optimized] target(s) in 1m 12s
+    Finished `release` profile [optimized] target(s) in 5.76s
+== 17:10:19 build shim
+== 17:10:19 run
++ OUT=/workspace/out
++ /workspace/llm-vx/Vx/target/release/vxc ref/test_gpu_small.vx --machine machines/dev.vx -O3
++ grep -v '^\['
++ echo 'test exit 0'
+test exit 0
++ tail -3 /workspace/out/test_gpu_small.log
+step 9: loss 6.203018 (took 45.968055725097656 ms) OK = 1
+overall okay: 1
+
++ /workspace/llm-vx/Vx/target/release/vxc ref/train_gpu_small.vx --machine machines/dev.vx -O3
++ grep -v '^\['
++ make train-check
++ python3 ref/compare_train.py build/llmc_train.txt /workspace/out/vx_gpu_train.txt --tol 0.001
++ tee /workspace/out/compare_small.txt
+val loss: 5 values, largest difference 0.000000, within 0.001
+train loss: 41 values, largest difference 0.000000, within 0.001
+samples: 2 blocks, identical
+overall okay: 1
++ mkdir -p build/rnd124
++ cc -O2 ref/make_random.c -o build/make_random
++ build/make_random build/rnd124 1024 50257 50304 12 12 768 40000
+num_parameters: 124475904
++ python3 gpu-support/entry.py build/bench_b4.vx 2 4 1024 build/rnd124
++ /workspace/llm-vx/Vx/target/release/vxc build/bench_b4.vx --machine machines/l4.vx -O3
++ echo 'B=4 exit 0'
+B=4 exit 0
++ grep -v '^\[flat' /workspace/out/bench_b4.log
++ tail -16
+[JIT] Executing native binary...
+[GPT-2 on GPU, train]
+step 0: train loss 10.824956 (took 4788.784503936768 ms)
+  forward 2151.5467166900635 ms, attention 1626.1487007141113 ms; backward 2540.6150817871094 ms, attention 1949.3508338928223 ms
+step 1: train loss 10.82474 (took 4439.06569480896 ms)
+  forward 1962.5084400177002 ms, attention 1602.6053428649902 ms; backward 2438.894510269165 ms, attention 1953.8276195526123 ms
+step 2: train loss 10.824699 (took 4427.484512329102 ms)
+  forward 1954.5865058898926 ms, attention 1597.9177951812744 ms; backward 2435.4259967803955 ms, attention 1949.27978515625 ms
+step 3: train loss 10.824813 (took 4406.5845012664795 ms)
+  forward 1949.1682052612305 ms, attention 1592.3748016357422 ms; backward 2419.4445610046387 ms, attention 1938.4849071502686 ms
+step 4: train loss 10.825045 (took 4449.753522872925 ms)
+  forward 1967.4732685089111 ms, attention 1606.229305267334 ms; backward 2444.3821907043457 ms, attention 1959.7437381744385 ms
+
+[Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
+  Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
+  Declare the space `managed: explicit` and the compiler will require the transfer home, or keep the operands in a space the host can read.
+== 17:11:37 done
