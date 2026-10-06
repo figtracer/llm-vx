@@ -1,5 +1,5 @@
 // The C side of gpu.vx: a cuBLAS handle, device pointer offsets (Vx has no
-// pointer arithmetic) and host <-> device copies. Built with -DVX_CUDA on a
+// pointer arithmetic), zeroing, and host <-> device copies. Built with -DVX_CUDA on a
 // CUDA machine. Without it, "device" memory is host memory and cublasSgemm_v2
 // is a plain loop, so the GPU program runs on a Mac for testing.
 #include <stdint.h>
@@ -41,6 +41,13 @@ int vx_synchronize(void) {
     check(cudaDeviceSynchronize(), "synchronize");
     return 0;
 }
+
+// n floats of device memory set to zero, as llm.c's CUDA version zeroes its
+// gradients. A Vx kernel writes one row per thread, which is slow for this.
+int vx_zero_f32(float* p, int64_t n) {
+    check(cudaMemset(p, 0, n * sizeof(float)), "memset");
+    return 0;
+}
 #else
 void* vx_cublas(void) { return (void*)1; }
 
@@ -55,6 +62,11 @@ int vx_download_f32(float* dst, int64_t dst_off, const float* src, int64_t n) {
 }
 
 int vx_synchronize(void) { return 0; }
+
+int vx_zero_f32(float* p, int64_t n) {
+    memset(p, 0, n * sizeof(float));
+    return 0;
+}
 
 // Column-major C = alpha * op(A) * op(B) + beta * C, with op 0 = N and 1 = T.
 int cublasSgemm_v2(void* handle, int transa, int transb, int m, int n, int k,

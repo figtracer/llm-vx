@@ -30,8 +30,14 @@ def decl(prefix, table, load=False):
         out.append(f'  let mut {v} = transfer({v}_h, Memory::GPU_HBM);')
     return '\n'.join(out)
 
-def zero(prefix, table):
-    return '\n'.join(f'    k_zero<{r}, {c}>(&mut {prefix}{n});' for n, r, c in table)
+# Gradients nothing has to zero before a step: the backward pass never reads
+# these, or (preatt, att) assigns them instead of accumulating.
+NO_ZERO = {'ln1_mean', 'ln1_rstd', 'ln2_mean', 'ln2_rstd', 'lnf_mean', 'lnf_rstd', 'probs', 'losses',
+           'preatt', 'att'}
+
+def zero(prefix, table, skip=()):
+    return '\n'.join(f'    unsafe {{ vx_zero_f32({prefix}{n}.as_mut_ptr(), ({r} as i64) * ({c} as i64)); }}'
+                     for n, r, c in table if n not in skip)
 
 def adamw():
     return '\n'.join(
@@ -58,7 +64,7 @@ src = src.replace('@VS@', decl('v_', params))
 src = src.replace('@ACTS@', decl('', acts))
 src = src.replace('@GRADACTS@', decl('d_', acts))
 src = src.replace('@ZERO_INIT@', zero('d_', params) + '\n' + zero('m_', params) + '\n' + zero('v_', params))
-src = src.replace('@ZERO_GRAD@', zero('d_', params) + '\n' + zero('d_', acts))
+src = src.replace('@ZERO_GRAD@', zero('d_', params) + '\n' + zero('d_', acts, NO_ZERO))
 src = src.replace('@ADAMW@', adamw())
 src = src.replace('@DOWNLOAD_GRADS@', download_grads())
 open(ROOT + '/train_gpu.vx', 'w').write(src)

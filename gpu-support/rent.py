@@ -1,6 +1,6 @@
 """Runs a job on a rented GPU through Fission: build Vx with CUDA, run the job, collect /workspace/out.
 
-usage: rent.py GPU JOB [--duration 3h] [--work 2h] [--budget 4] [--keep] [--approve]
+usage: rent.py GPU JOB [--duration 3h] [--work 2h] [--budget 1] [--keep] [--approve]
        rent.py GPU JOB --reuse NAME --tag T [--work 2h] [--keep]
 
 Without --approve it prints the quote and stops. A failed or unclear purchase
@@ -53,7 +53,7 @@ def main():
     parser.add_argument('job')
     parser.add_argument('--duration', default='3h')
     parser.add_argument('--work', default='2h')
-    parser.add_argument('--budget', default='4')
+    parser.add_argument('--budget', default='1')
     parser.add_argument('--name')
     parser.add_argument('--keep', action='store_true')
     parser.add_argument('--approve', action='store_true')
@@ -97,7 +97,7 @@ def main():
                 check=False)
         # Downloads come back 48 KB per paid call, so only small text results.
         for remote in ['test_gpu_small.log', 'vx_gpu_train.txt', 'compare_small.txt', 'probe.txt',
-                       *[f'bench_b{b}.log' for b in (4, 5, 17, 18)]]:
+                       'kernel_times.txt', *[f'bench_b{b}.log' for b in (4, 5, 17, 18)]]:
             fission('download', name, f'/workspace/out/{remote}', str(out / remote), check=False)
     except Exception:
         failed = True

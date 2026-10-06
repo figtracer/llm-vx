@@ -241,7 +241,9 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
       k_add_bias<LBT, C3, LC3>(&mut qkv, &qkvb, l * C3, lo, BT);
       let a0 = phase_time(mode);
       k_attention_scores<RA, T, LBT, C3>(&mut preatt, &mut att, &qkv, NH, BT, l, scale, l * B * NH * T, B * NH * T);
-      k_attention_out<LBT, C, RA, T, C3>(&mut atty, &att, &qkv, NH, BT, l, lo, BT);
+      // preatt is dead from here on, so the output per head goes through it.
+      k_attention_out_head<RA, T, LBT, C3>(&mut preatt, &att, &qkv, NH, BT, l, l * B * NH * T, B * NH * T);
+      k_attention_out_gather<LBT, C, RA, T>(&mut atty, &preatt, NH, BT, l, lo, BT);
       t_attn_fwd = t_attn_fwd + phase_time(mode) - a0;
       unsafe {
         cublas_matmul_forward(vx_dev_at(attproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(atty.as_mut_ptr(), lo64 * (C as i64)),

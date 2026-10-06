@@ -27,6 +27,7 @@ extern "C" {
   fn vx_upload_i32(dst : *mut i32 in Memory::GPU_HBM, src : *mut i32, n : i64) -> i32;
   fn vx_download_f32(dst : *mut f32, dst_off : i64, src : *mut f32 in Memory::GPU_HBM, n : i64) -> i32;
   fn vx_synchronize() -> i32;
+  fn vx_zero_f32(p : *mut f32 in Memory::GPU_HBM, n : i64) -> i32;
   fn sqrtf(x : f32) -> f32;
   fn powf(x : f32, y : f32) -> f32;
 }
@@ -70,15 +71,6 @@ fn cublas_matmul_backward(dinp : *mut f32 in Memory::GPU_HBM, dweight : *mut f32
 
 // ----------------------------------------------------------------------------
 // Kernels.
-
-fn k_zero<const R : i32, const C : i32>(t : &mut Tensor<f32, [R, C], Memory::GPU_HBM>) -> void {
-  spawn on(Topology::GPU) {
-    for r in 0..R {
-      for c in 0..C { t[r][c] = 0.0; }
-    }
-  }
-  return;
-}
 
 fn k_encoder_forward<const BT : i32, const C : i32, const VP : i32, const MAXT : i32>(
     out : &mut Tensor<f32, [BT, C], Memory::GPU_HBM>, inp : &Tensor<i32, [BT, 1], Memory::GPU_HBM>,
@@ -186,10 +178,91 @@ fn k_attention_scores<const RA : i32, const T : i32, const R : i32, const C3 : i
   return;
 }
 
-// out rows are (l, b, t): the attention-weighted sum of the values, per head.
-fn k_attention_out<const R : i32, const C : i32, const RA : i32, const T : i32, const C3 : i32>(
-    out : &mut Tensor<f32, [R, C], Memory::GPU_HBM>, att : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
+// The attention output of one (batch, head, position): out[i] = the sum over
+// t2 <= t of att[t2] * value[t2][i], into the first hs columns of that row of
+// `scratch`. The caller passes preatt, which nothing reads once att is computed.
+// One thread per row of att, and 16 outputs per pass over the row, so the row
+// is read hs / 16 times. hs must be a multiple of 16.
+fn k_attention_out_head<const RA : i32, const T : i32, const R : i32, const C3 : i32>(
+    scratch : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, att : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
     qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>, NH : i32, BT : i32, l : i32, lo : i32, n : i32) -> void {
+  let C = C3 / 3;
+  let hs = C / NH;
+  spawn on(Topology::GPU) {
+    for r in 0..RA {
+      if r >= lo && r < lo + n {
+        let rr = r - lo;
+        let b = rr / (NH * T);
+        let h = (rr / T) % NH;
+        let t = rr % T;
+        let row0 = l * BT + b * T;
+        for chunk in 0..(hs / 16) {
+          let i0 = chunk * 16;
+          let c = C * 2 + h * hs + i0;
+          let mut s0 : f32 = 0.0;
+          let mut s1 : f32 = 0.0;
+          let mut s2 : f32 = 0.0;
+          let mut s3 : f32 = 0.0;
+          let mut s4 : f32 = 0.0;
+          let mut s5 : f32 = 0.0;
+          let mut s6 : f32 = 0.0;
+          let mut s7 : f32 = 0.0;
+          let mut s8 : f32 = 0.0;
+          let mut s9 : f32 = 0.0;
+          let mut s10 : f32 = 0.0;
+          let mut s11 : f32 = 0.0;
+          let mut s12 : f32 = 0.0;
+          let mut s13 : f32 = 0.0;
+          let mut s14 : f32 = 0.0;
+          let mut s15 : f32 = 0.0;
+          for t2 in 0..(t + 1) {
+            let w = att[r][t2];
+            let v = row0 + t2;
+            s0 = s0 + w * qkv[v][c];
+            s1 = s1 + w * qkv[v][c + 1];
+            s2 = s2 + w * qkv[v][c + 2];
+            s3 = s3 + w * qkv[v][c + 3];
+            s4 = s4 + w * qkv[v][c + 4];
+            s5 = s5 + w * qkv[v][c + 5];
+            s6 = s6 + w * qkv[v][c + 6];
+            s7 = s7 + w * qkv[v][c + 7];
+            s8 = s8 + w * qkv[v][c + 8];
+            s9 = s9 + w * qkv[v][c + 9];
+            s10 = s10 + w * qkv[v][c + 10];
+            s11 = s11 + w * qkv[v][c + 11];
+            s12 = s12 + w * qkv[v][c + 12];
+            s13 = s13 + w * qkv[v][c + 13];
+            s14 = s14 + w * qkv[v][c + 14];
+            s15 = s15 + w * qkv[v][c + 15];
+          }
+          scratch[r][i0] = s0;
+          scratch[r][i0 + 1] = s1;
+          scratch[r][i0 + 2] = s2;
+          scratch[r][i0 + 3] = s3;
+          scratch[r][i0 + 4] = s4;
+          scratch[r][i0 + 5] = s5;
+          scratch[r][i0 + 6] = s6;
+          scratch[r][i0 + 7] = s7;
+          scratch[r][i0 + 8] = s8;
+          scratch[r][i0 + 9] = s9;
+          scratch[r][i0 + 10] = s10;
+          scratch[r][i0 + 11] = s11;
+          scratch[r][i0 + 12] = s12;
+          scratch[r][i0 + 13] = s13;
+          scratch[r][i0 + 14] = s14;
+          scratch[r][i0 + 15] = s15;
+        }
+      }
+    }
+  }
+  return;
+}
+
+// out = the attention output, for rows [lo, lo + n) of out: each position
+// collects its heads from `scratch`.
+fn k_attention_out_gather<const R : i32, const C : i32, const RA : i32, const T : i32>(
+    out : &mut Tensor<f32, [R, C], Memory::GPU_HBM>, scratch : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
+    NH : i32, BT : i32, l : i32, lo : i32, n : i32) -> void {
   let hs = C / NH;
   spawn on(Topology::GPU) {
     for r in 0..R {
@@ -199,13 +272,7 @@ fn k_attention_out<const R : i32, const C : i32, const RA : i32, const T : i32, 
         let t = rr % T;
         for h in 0..NH {
           let a = l * BT * NH + b * NH * T + h * T + t;
-          for i in 0..hs {
-            let mut acc : f32 = 0.0;
-            for t2 in 0..(t + 1) {
-              acc = acc + att[a][t2] * qkv[l * BT + b * T + t2][C * 2 + h * hs + i];
-            }
-            out[r][h * hs + i] = acc;
-          }
+          for i in 0..hs { out[r][h * hs + i] = scratch[a][i]; }
         }
       }
     }
@@ -412,6 +479,8 @@ fn k_gelu_backward<const R : i32, const C : i32>(dinp : &mut Tensor<f32, [R, C],
 }
 
 // For one query position: datt from the values, then dpreatt through the softmax.
+// Both are assigned, not accumulated, so neither needs zeroing before a step.
+// Entries above the diagonal stay as they are; nothing reads them.
 fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, const C3 : i32, const C : i32>(
     dpreatt : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, datt : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>,
     att : &Tensor<f32, [RA, T], Memory::GPU_HBM>, qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>,
@@ -427,7 +496,7 @@ fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, con
         let o = l * BT + b * T + t;
         for t2 in 0..(t + 1) {
           let v = l * BT + b * T + t2;
-          let mut acc : f32 = datt[r][t2];
+          let mut acc : f32 = 0.0;
           for i in 0..hs { acc = acc + qkv[v][C * 2 + h * hs + i] * dout[o][h * hs + i]; }
           datt[r][t2] = acc;
         }
@@ -438,7 +507,7 @@ fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, con
         let mut dot : f32 = 0.0;
         for t2 in 0..(t + 1) { dot = dot + att[r][t2] * datt[r][t2]; }
         for t3 in 0..(t + 1) {
-          dpreatt[r][t3] = dpreatt[r][t3] + att[r][t3] * (datt[r][t3] - dot);
+          dpreatt[r][t3] = att[r][t3] * (datt[r][t3] - dot);
         }
       }
     }
@@ -452,7 +521,8 @@ fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, con
 // threads as one per position. dquery sums over the keys before the position,
 // dkey and dvalue over the queries at or after it. The second loop runs over
 // every query and skips the earlier ones, so a warp reads one row of att and
-// dpreatt at a time.
+// dpreatt at a time. 16 outputs per pass, so each row or column is read hs / 16
+// times. hs must be a multiple of 16.
 fn k_attention_backward_part<const RA : i32, const T : i32, const R : i32, const C3 : i32, const C : i32>(
     scratch : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, dpreatt : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
     att : &Tensor<f32, [RA, T], Memory::GPU_HBM>, qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>,
@@ -466,27 +536,113 @@ fn k_attention_backward_part<const RA : i32, const T : i32, const R : i32, const
         let b = rr / (NH * T);
         let h = (rr / T) % NH;
         let t = rr % T;
-        let a0 = lo + b * NH * T + h * T;
-        for i in 0..hs {
-          let mut acc : f32 = 0.0;
+        let arow = lo + b * NH * T + h * T;
+        let row0 = l * BT + b * T;
+        for chunk in 0..(hs / 16) {
+          let i0 = chunk * 16;
+          let mut s0 : f32 = 0.0;
+          let mut s1 : f32 = 0.0;
+          let mut s2 : f32 = 0.0;
+          let mut s3 : f32 = 0.0;
+          let mut s4 : f32 = 0.0;
+          let mut s5 : f32 = 0.0;
+          let mut s6 : f32 = 0.0;
+          let mut s7 : f32 = 0.0;
+          let mut s8 : f32 = 0.0;
+          let mut s9 : f32 = 0.0;
+          let mut s10 : f32 = 0.0;
+          let mut s11 : f32 = 0.0;
+          let mut s12 : f32 = 0.0;
+          let mut s13 : f32 = 0.0;
+          let mut s14 : f32 = 0.0;
+          let mut s15 : f32 = 0.0;
           if part == 0 {
+            let c = C + h * hs + i0;
             for t2 in 0..(t + 1) {
-              acc = acc + qkv[l * BT + b * T + t2][C + h * hs + i] * dpreatt[r][t2] * scale;
+              let d = dpreatt[r][t2];
+              let k = row0 + t2;
+              s0 = s0 + qkv[k][c] * d * scale;
+              s1 = s1 + qkv[k][c + 1] * d * scale;
+              s2 = s2 + qkv[k][c + 2] * d * scale;
+              s3 = s3 + qkv[k][c + 3] * d * scale;
+              s4 = s4 + qkv[k][c + 4] * d * scale;
+              s5 = s5 + qkv[k][c + 5] * d * scale;
+              s6 = s6 + qkv[k][c + 6] * d * scale;
+              s7 = s7 + qkv[k][c + 7] * d * scale;
+              s8 = s8 + qkv[k][c + 8] * d * scale;
+              s9 = s9 + qkv[k][c + 9] * d * scale;
+              s10 = s10 + qkv[k][c + 10] * d * scale;
+              s11 = s11 + qkv[k][c + 11] * d * scale;
+              s12 = s12 + qkv[k][c + 12] * d * scale;
+              s13 = s13 + qkv[k][c + 13] * d * scale;
+              s14 = s14 + qkv[k][c + 14] * d * scale;
+              s15 = s15 + qkv[k][c + 15] * d * scale;
             }
           } else if part == 1 {
+            let c = h * hs + i0;
             for tq in 0..T {
               if tq >= t {
-                acc = acc + qkv[l * BT + b * T + tq][h * hs + i] * dpreatt[a0 + tq][t] * scale;
+                let d = dpreatt[arow + tq][t];
+                let q = row0 + tq;
+                s0 = s0 + qkv[q][c] * d * scale;
+                s1 = s1 + qkv[q][c + 1] * d * scale;
+                s2 = s2 + qkv[q][c + 2] * d * scale;
+                s3 = s3 + qkv[q][c + 3] * d * scale;
+                s4 = s4 + qkv[q][c + 4] * d * scale;
+                s5 = s5 + qkv[q][c + 5] * d * scale;
+                s6 = s6 + qkv[q][c + 6] * d * scale;
+                s7 = s7 + qkv[q][c + 7] * d * scale;
+                s8 = s8 + qkv[q][c + 8] * d * scale;
+                s9 = s9 + qkv[q][c + 9] * d * scale;
+                s10 = s10 + qkv[q][c + 10] * d * scale;
+                s11 = s11 + qkv[q][c + 11] * d * scale;
+                s12 = s12 + qkv[q][c + 12] * d * scale;
+                s13 = s13 + qkv[q][c + 13] * d * scale;
+                s14 = s14 + qkv[q][c + 14] * d * scale;
+                s15 = s15 + qkv[q][c + 15] * d * scale;
               }
             }
           } else {
+            let c = h * hs + i0;
             for tq in 0..T {
               if tq >= t {
-                acc = acc + att[a0 + tq][t] * dout[l * BT + b * T + tq][h * hs + i];
+                let w = att[arow + tq][t];
+                let q = row0 + tq;
+                s0 = s0 + w * dout[q][c];
+                s1 = s1 + w * dout[q][c + 1];
+                s2 = s2 + w * dout[q][c + 2];
+                s3 = s3 + w * dout[q][c + 3];
+                s4 = s4 + w * dout[q][c + 4];
+                s5 = s5 + w * dout[q][c + 5];
+                s6 = s6 + w * dout[q][c + 6];
+                s7 = s7 + w * dout[q][c + 7];
+                s8 = s8 + w * dout[q][c + 8];
+                s9 = s9 + w * dout[q][c + 9];
+                s10 = s10 + w * dout[q][c + 10];
+                s11 = s11 + w * dout[q][c + 11];
+                s12 = s12 + w * dout[q][c + 12];
+                s13 = s13 + w * dout[q][c + 13];
+                s14 = s14 + w * dout[q][c + 14];
+                s15 = s15 + w * dout[q][c + 15];
               }
             }
           }
-          scratch[r][i] = acc;
+          scratch[r][i0] = s0;
+          scratch[r][i0 + 1] = s1;
+          scratch[r][i0 + 2] = s2;
+          scratch[r][i0 + 3] = s3;
+          scratch[r][i0 + 4] = s4;
+          scratch[r][i0 + 5] = s5;
+          scratch[r][i0 + 6] = s6;
+          scratch[r][i0 + 7] = s7;
+          scratch[r][i0 + 8] = s8;
+          scratch[r][i0 + 9] = s9;
+          scratch[r][i0 + 10] = s10;
+          scratch[r][i0 + 11] = s11;
+          scratch[r][i0 + 12] = s12;
+          scratch[r][i0 + 13] = s13;
+          scratch[r][i0 + 14] = s14;
+          scratch[r][i0 + 15] = s15;
         }
       }
     }

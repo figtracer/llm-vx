@@ -330,54 +330,54 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
   let tg_h = Tensor<i32, [BT, 1]>::uninit();
   let mut targets = transfer(tg_h, Memory::GPU_HBM);
 
-    k_zero<VP, C>(&mut d_wte);
-    k_zero<MAXT, C>(&mut d_wpe);
-    k_zero<LC, 1>(&mut d_ln1w);
-    k_zero<LC, 1>(&mut d_ln1b);
-    k_zero<LC3, C>(&mut d_qkvw);
-    k_zero<LC3, 1>(&mut d_qkvb);
-    k_zero<LC, C>(&mut d_attprojw);
-    k_zero<LC, 1>(&mut d_attprojb);
-    k_zero<LC, 1>(&mut d_ln2w);
-    k_zero<LC, 1>(&mut d_ln2b);
-    k_zero<LC4, C>(&mut d_fcw);
-    k_zero<LC4, 1>(&mut d_fcb);
-    k_zero<LC, C4>(&mut d_fcprojw);
-    k_zero<LC, 1>(&mut d_fcprojb);
-    k_zero<C, 1>(&mut d_lnfw);
-    k_zero<C, 1>(&mut d_lnfb);
-    k_zero<VP, C>(&mut m_wte);
-    k_zero<MAXT, C>(&mut m_wpe);
-    k_zero<LC, 1>(&mut m_ln1w);
-    k_zero<LC, 1>(&mut m_ln1b);
-    k_zero<LC3, C>(&mut m_qkvw);
-    k_zero<LC3, 1>(&mut m_qkvb);
-    k_zero<LC, C>(&mut m_attprojw);
-    k_zero<LC, 1>(&mut m_attprojb);
-    k_zero<LC, 1>(&mut m_ln2w);
-    k_zero<LC, 1>(&mut m_ln2b);
-    k_zero<LC4, C>(&mut m_fcw);
-    k_zero<LC4, 1>(&mut m_fcb);
-    k_zero<LC, C4>(&mut m_fcprojw);
-    k_zero<LC, 1>(&mut m_fcprojb);
-    k_zero<C, 1>(&mut m_lnfw);
-    k_zero<C, 1>(&mut m_lnfb);
-    k_zero<VP, C>(&mut v_wte);
-    k_zero<MAXT, C>(&mut v_wpe);
-    k_zero<LC, 1>(&mut v_ln1w);
-    k_zero<LC, 1>(&mut v_ln1b);
-    k_zero<LC3, C>(&mut v_qkvw);
-    k_zero<LC3, 1>(&mut v_qkvb);
-    k_zero<LC, C>(&mut v_attprojw);
-    k_zero<LC, 1>(&mut v_attprojb);
-    k_zero<LC, 1>(&mut v_ln2w);
-    k_zero<LC, 1>(&mut v_ln2b);
-    k_zero<LC4, C>(&mut v_fcw);
-    k_zero<LC4, 1>(&mut v_fcb);
-    k_zero<LC, C4>(&mut v_fcprojw);
-    k_zero<LC, 1>(&mut v_fcprojb);
-    k_zero<C, 1>(&mut v_lnfw);
-    k_zero<C, 1>(&mut v_lnfb);
+    unsafe { vx_zero_f32(d_wte.as_mut_ptr(), (VP as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_wpe.as_mut_ptr(), (MAXT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_ln1w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_ln1b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_qkvw.as_mut_ptr(), (LC3 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_qkvb.as_mut_ptr(), (LC3 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_attprojw.as_mut_ptr(), (LC as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_attprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_ln2w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_ln2b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_fcw.as_mut_ptr(), (LC4 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_fcb.as_mut_ptr(), (LC4 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_fcprojw.as_mut_ptr(), (LC as i64) * (C4 as i64)); }
+    unsafe { vx_zero_f32(d_fcprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_lnfw.as_mut_ptr(), (C as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_lnfb.as_mut_ptr(), (C as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_wte.as_mut_ptr(), (VP as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(m_wpe.as_mut_ptr(), (MAXT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(m_ln1w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_ln1b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_qkvw.as_mut_ptr(), (LC3 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(m_qkvb.as_mut_ptr(), (LC3 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_attprojw.as_mut_ptr(), (LC as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(m_attprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_ln2w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_ln2b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_fcw.as_mut_ptr(), (LC4 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(m_fcb.as_mut_ptr(), (LC4 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_fcprojw.as_mut_ptr(), (LC as i64) * (C4 as i64)); }
+    unsafe { vx_zero_f32(m_fcprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_lnfw.as_mut_ptr(), (C as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(m_lnfb.as_mut_ptr(), (C as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_wte.as_mut_ptr(), (VP as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(v_wpe.as_mut_ptr(), (MAXT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(v_ln1w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_ln1b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_qkvw.as_mut_ptr(), (LC3 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(v_qkvb.as_mut_ptr(), (LC3 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_attprojw.as_mut_ptr(), (LC as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(v_attprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_ln2w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_ln2b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_fcw.as_mut_ptr(), (LC4 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(v_fcb.as_mut_ptr(), (LC4 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_fcprojw.as_mut_ptr(), (LC as i64) * (C4 as i64)); }
+    unsafe { vx_zero_f32(v_fcprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_lnfw.as_mut_ptr(), (C as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(v_lnfb.as_mut_ptr(), (C as i64) * (1 as i64)); }
 
   // Host buffers: the next batch, the losses and one row of probabilities.
   let mut host_inputs = Tensor<i32>([BT]);
@@ -518,7 +518,9 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
       k_add_bias<LBT, C3, LC3>(&mut qkv, &qkvb, l * C3, lo, BT);
       let a0 = phase_time(mode);
       k_attention_scores<RA, T, LBT, C3>(&mut preatt, &mut att, &qkv, NH, BT, l, scale, l * B * NH * T, B * NH * T);
-      k_attention_out<LBT, C, RA, T, C3>(&mut atty, &att, &qkv, NH, BT, l, lo, BT);
+      // preatt is dead from here on, so the output per head goes through it.
+      k_attention_out_head<RA, T, LBT, C3>(&mut preatt, &att, &qkv, NH, BT, l, l * B * NH * T, B * NH * T);
+      k_attention_out_gather<LBT, C, RA, T>(&mut atty, &preatt, NH, BT, l, lo, BT);
       t_attn_fwd = t_attn_fwd + phase_time(mode) - a0;
       unsafe {
         cublas_matmul_forward(vx_dev_at(attproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(atty.as_mut_ptr(), lo64 * (C as i64)),
@@ -587,45 +589,35 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
       }
     } else {
       // Backward pass.
-    k_zero<VP, C>(&mut d_wte);
-    k_zero<MAXT, C>(&mut d_wpe);
-    k_zero<LC, 1>(&mut d_ln1w);
-    k_zero<LC, 1>(&mut d_ln1b);
-    k_zero<LC3, C>(&mut d_qkvw);
-    k_zero<LC3, 1>(&mut d_qkvb);
-    k_zero<LC, C>(&mut d_attprojw);
-    k_zero<LC, 1>(&mut d_attprojb);
-    k_zero<LC, 1>(&mut d_ln2w);
-    k_zero<LC, 1>(&mut d_ln2b);
-    k_zero<LC4, C>(&mut d_fcw);
-    k_zero<LC4, 1>(&mut d_fcb);
-    k_zero<LC, C4>(&mut d_fcprojw);
-    k_zero<LC, 1>(&mut d_fcprojb);
-    k_zero<C, 1>(&mut d_lnfw);
-    k_zero<C, 1>(&mut d_lnfb);
-    k_zero<BT, C>(&mut d_encoded);
-    k_zero<LBT, C>(&mut d_ln1);
-    k_zero<LBT, 1>(&mut d_ln1_mean);
-    k_zero<LBT, 1>(&mut d_ln1_rstd);
-    k_zero<LBT, C3>(&mut d_qkv);
-    k_zero<LBT, C>(&mut d_atty);
-    k_zero<RA, T>(&mut d_preatt);
-    k_zero<RA, T>(&mut d_att);
-    k_zero<LBT, C>(&mut d_attproj);
-    k_zero<LBT, C>(&mut d_residual2);
-    k_zero<LBT, C>(&mut d_ln2);
-    k_zero<LBT, 1>(&mut d_ln2_mean);
-    k_zero<LBT, 1>(&mut d_ln2_rstd);
-    k_zero<LBT, C4>(&mut d_fch);
-    k_zero<LBT, C4>(&mut d_fch_gelu);
-    k_zero<LBT, C>(&mut d_fcproj);
-    k_zero<LBT, C>(&mut d_residual3);
-    k_zero<BT, C>(&mut d_lnf);
-    k_zero<BT, 1>(&mut d_lnf_mean);
-    k_zero<BT, 1>(&mut d_lnf_rstd);
-    k_zero<BT, VP>(&mut d_logits);
-    k_zero<BT, VP>(&mut d_probs);
-    k_zero<BT, 1>(&mut d_losses);
+    unsafe { vx_zero_f32(d_wte.as_mut_ptr(), (VP as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_wpe.as_mut_ptr(), (MAXT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_ln1w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_ln1b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_qkvw.as_mut_ptr(), (LC3 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_qkvb.as_mut_ptr(), (LC3 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_attprojw.as_mut_ptr(), (LC as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_attprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_ln2w.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_ln2b.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_fcw.as_mut_ptr(), (LC4 as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_fcb.as_mut_ptr(), (LC4 as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_fcprojw.as_mut_ptr(), (LC as i64) * (C4 as i64)); }
+    unsafe { vx_zero_f32(d_fcprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_lnfw.as_mut_ptr(), (C as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_lnfb.as_mut_ptr(), (C as i64) * (1 as i64)); }
+    unsafe { vx_zero_f32(d_encoded.as_mut_ptr(), (BT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_ln1.as_mut_ptr(), (LBT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_qkv.as_mut_ptr(), (LBT as i64) * (C3 as i64)); }
+    unsafe { vx_zero_f32(d_atty.as_mut_ptr(), (LBT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_attproj.as_mut_ptr(), (LBT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_residual2.as_mut_ptr(), (LBT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_ln2.as_mut_ptr(), (LBT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_fch.as_mut_ptr(), (LBT as i64) * (C4 as i64)); }
+    unsafe { vx_zero_f32(d_fch_gelu.as_mut_ptr(), (LBT as i64) * (C4 as i64)); }
+    unsafe { vx_zero_f32(d_fcproj.as_mut_ptr(), (LBT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_residual3.as_mut_ptr(), (LBT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_lnf.as_mut_ptr(), (BT as i64) * (C as i64)); }
+    unsafe { vx_zero_f32(d_logits.as_mut_ptr(), (BT as i64) * (VP as i64)); }
       let dloss : f32 = 1.0 / (BT as f32);
       k_crossentropy_softmax_backward<BT, VP>(&mut d_logits, &probs, &targets, dloss, V);
       unsafe {

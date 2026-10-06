@@ -1,3 +1,19 @@
+Warning[W1001] at 287:3: Unused variable 'd_ln1_mean'
+  help: prefix with underscore to suppress -- replace with `_d_ln1_mean`
+Warning[W1001] at 289:3: Unused variable 'd_ln1_rstd'
+  help: prefix with underscore to suppress -- replace with `_d_ln1_rstd`
+Warning[W1001] at 305:3: Unused variable 'd_ln2_mean'
+  help: prefix with underscore to suppress -- replace with `_d_ln2_mean`
+Warning[W1001] at 307:3: Unused variable 'd_ln2_rstd'
+  help: prefix with underscore to suppress -- replace with `_d_ln2_rstd`
+Warning[W1001] at 319:3: Unused variable 'd_lnf_mean'
+  help: prefix with underscore to suppress -- replace with `_d_lnf_mean`
+Warning[W1001] at 321:3: Unused variable 'd_lnf_rstd'
+  help: prefix with underscore to suppress -- replace with `_d_lnf_rstd`
+Warning[W1001] at 325:3: Unused variable 'd_probs'
+  help: prefix with underscore to suppress -- replace with `_d_probs`
+Warning[W1001] at 327:3: Unused variable 'd_losses'
+  help: prefix with underscore to suppress -- replace with `_d_losses`
 [flat-codegen] emitted module via the flat path
 LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is not a file.
 
@@ -7,16 +23,16 @@ LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is no
 [JIT] Linking native executable...
 [JIT] Executing native binary...
 [GPT-2 on GPU, train]
-step 0: train loss 10.824956 (took 4788.784503936768 ms)
-  forward 2151.5467166900635 ms, attention 1626.1487007141113 ms; backward 2540.6150817871094 ms, attention 1949.3508338928223 ms
-step 1: train loss 10.82474 (took 4439.06569480896 ms)
-  forward 1962.5084400177002 ms, attention 1602.6053428649902 ms; backward 2438.894510269165 ms, attention 1953.8276195526123 ms
-step 2: train loss 10.824699 (took 4427.484512329102 ms)
-  forward 1954.5865058898926 ms, attention 1597.9177951812744 ms; backward 2435.4259967803955 ms, attention 1949.27978515625 ms
-step 3: train loss 10.824813 (took 4406.5845012664795 ms)
-  forward 1949.1682052612305 ms, attention 1592.3748016357422 ms; backward 2419.4445610046387 ms, attention 1938.4849071502686 ms
-step 4: train loss 10.825045 (took 4449.753522872925 ms)
-  forward 1967.4732685089111 ms, attention 1606.229305267334 ms; backward 2444.3821907043457 ms, attention 1959.7437381744385 ms
+step 0: train loss 10.824956 (took 2290.815591812134 ms)
+  forward 1290.8012866973877 ms, attention 458.43505859375 ms; backward 924.8003959655762 ms, attention 559.859037399292 ms
+step 1: train loss 10.82474 (took 1720.7560539245605 ms)
+  forward 810.4245662689209 ms, attention 453.31573486328125 ms; backward 873.9752769470215 ms, attention 551.8207550048828 ms
+step 2: train loss 10.824699 (took 1683.8178634643555 ms)
+  forward 805.8900833129883 ms, attention 447.36242294311523 ms; backward 841.7308330535889 ms, attention 526.7074108123779 ms
+step 3: train loss 10.824813 (took 1716.299295425415 ms)
+  forward 810.3117942810059 ms, attention 453.9518356323242 ms; backward 869.3404197692871 ms, attention 549.5181083679199 ms
+step 4: train loss 10.825045 (took 1736.5083694458008 ms)
+  forward 824.5813846588135 ms, attention 466.5846824645996 ms; backward 875.6108283996582 ms, attention 553.4007549285889 ms
 
 [Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
   Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
