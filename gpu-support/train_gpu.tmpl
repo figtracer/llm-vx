@@ -1,7 +1,7 @@
 // GPT-2 training on the GPU. Every buffer a training step touches is a tensor
-// placed in `Memory::HBM`, allocated in `run` so Vx's capacity check sees the
-// whole step at once. Compile against a machine file from Vx's fleet and the
-// compiler answers whether this exact program fits that GPU.
+// placed in `Memory::GPU_HBM`, allocated in `run` so Vx's capacity check sees the
+// whole step at once. Compile against a machine file that gives GPU_HBM a GPU's
+// capacity, and the compiler answers whether this exact program fits that GPU.
 //
 // Mode 0 checks one forward and backward pass and ten AdamW steps against a
 // reference, as test_gpt2.vx does. Mode 1 trains, as train.vx does.
@@ -88,9 +88,9 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
 @ACTS@
 @GRADACTS@
   let in_h = Tensor<i32, [BT, 1]>::uninit();
-  let mut inputs = transfer(in_h, Memory::HBM);
+  let mut inputs = transfer(in_h, Memory::GPU_HBM);
   let tg_h = Tensor<i32, [BT, 1]>::uninit();
-  let mut targets = transfer(tg_h, Memory::HBM);
+  let mut targets = transfer(tg_h, Memory::GPU_HBM);
 
 @ZERO_INIT@
 
@@ -189,7 +189,6 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
           for i in 0..BT { gen[i] = tokenizer.eot_token; }
         }
         gen_t = 1;
-        print!("generating:\n---\n");
       }
     }
     step_started = true;
@@ -277,6 +276,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
         print!("val loss "); print(val_loss / 5.0); print!("\n");
       }
     } else if job == 1 {
+      if gen_t == 1 { print!("generating:\n---\n"); }
       unsafe {
         vx_download_f32(hprobs, 0, vx_dev_at(probs.as_mut_ptr(), ((gen_t - 1) as i64) * (VP as i64)), VP as i64);
       }

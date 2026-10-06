@@ -27,7 +27,7 @@ def decl(prefix, table, load=False):
             out.append(f'  off = load<{r}, {c}>(&mut {v}_h, weights, off);')
         else:
             out.append(f'  let {v}_h = Tensor<f32, [{r}, {c}]>::uninit();')
-        out.append(f'  let mut {v} = transfer({v}_h, Memory::HBM);')
+        out.append(f'  let mut {v} = transfer({v}_h, Memory::GPU_HBM);')
     return '\n'.join(out)
 
 def zero(prefix, table):

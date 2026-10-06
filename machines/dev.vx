@@ -1,18 +1,10 @@
-// A stand-in GPU for running the GPU program on any machine: on a host without
-// the CUDA plugin, Vx runs `spawn` blocks on the CPU and transfers are copies.
-// Two departures from Vx's fleet files, both needed for `spawn` kernels: HBM is
-// `managed: cached`, because Vx refuses non-matmul kernels on operands in an
-// explicitly managed space, and it is `within: Memory::CPU_DRAM`, because
-// otherwise a kernel cannot take a host scalar or a tensor reference (Vx#850).
-// CPU_DRAM is declared here, rather than through `--host`, for the same reason.
+// A GPU for running the GPU program anywhere. On a host without Vx's CUDA
+// plugin (any Mac), `spawn` blocks run on the CPU and transfers are copies.
+//
+// GPU_HBM is `within: Memory::CPU_DRAM` so a kernel can take host scalars and
+// tensor references (Vx#850), and `managed: cached` because Vx refuses
+// non-matmul kernels on operands in an explicitly managed space.
 Memory CPU_DRAM {}
-Memory HBM {
+Memory GPU_HBM {
   within: Memory::CPU_DRAM, capacity: 64 GiB, bandwidth: 100 GB/s, managed: cached, scope: device
-}
-Topology Device {
-  arch: nvptx64,
-  memory: Memory::HBM,
-  visible: [Memory::HBM],
-  transfer Memory::CPU_DRAM -> Memory::HBM : 100 GB/s,
-  transfer Memory::HBM -> Memory::CPU_DRAM : 100 GB/s
 }

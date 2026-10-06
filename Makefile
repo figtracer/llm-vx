@@ -3,7 +3,7 @@ VXC := Vx/target/release/vxc
 VXENV := source Vx/config.local && export VX_STD_PATH=$(CURDIR)/Vx/stdlib/std:$(CURDIR)/Vx/stdlib &&
 SHELL := /bin/bash
 
-.PHONY: test ref train train-check gpu-test clean
+.PHONY: test ref train train-check gpu-test gpu-train-check clean
 
 test: build/ref_model.bin
 	$(VXENV) $(VXC) test_gpt2.vx -O3
@@ -44,6 +44,12 @@ gpu-test: build/ref_model.bin
 	python3 gpu-support/gen_train_gpu.py
 	$(CC) -O2 $(SHIM_FLAGS) -c gpu-support/shim.c -o build/shim.o
 	$(VXENV) VX_SHIM=$(CURDIR)/build/shim.o CLANG_PATH=$(CURDIR)/gpu-support/clang-link.sh $(VXC) ref/test_gpu_small.vx --machine $(MACHINE) -O3
+
+# The GPU program's training mode against llm.c's train_gpt2 on the same files.
+gpu-train-check: train-check
+	$(CC) -O2 $(SHIM_FLAGS) -c gpu-support/shim.c -o build/shim.o
+	$(VXENV) VX_SHIM=$(CURDIR)/build/shim.o CLANG_PATH=$(CURDIR)/gpu-support/clang-link.sh $(VXC) ref/train_gpu_small.vx --machine $(MACHINE) -O3 2>/dev/null | grep -v '^\[' > build/vx_gpu_train.txt
+	python3 ref/compare_train.py build/llmc_train.txt build/vx_gpu_train.txt
 
 clean:
 	rm -rf build
