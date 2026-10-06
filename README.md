@@ -18,9 +18,9 @@ can allocate on that card, measured by `gpu-support/probe.py`. Then we ran it on
 
 | GPU | Batch | Bytes Vx counts | Declared capacity | Measured capacity | On the card |
 |---|---:|---:|---|---|---|
-| L4 | 4 | 20,439,867,392 | admitted (24 GiB) | admitted (23,452,450,816 B) | trains, 24 s/step |
+| L4 | 4 | 20,439,867,392 | admitted (24 GiB) | admitted (23,452,450,816 B) | trains |
 | L4 | 5 | 25,051,930,624 | admitted | **rejected** | `cudaMalloc` out of memory |
-| H100 | 17 | 80,396,689,408 | admitted (80 GiB, Vx's fleet file) | admitted (84,462,796,800 B) | trains, 24 s/step |
+| H100 | 17 | 80,396,689,408 | admitted (80 GiB, Vx's fleet file) | admitted (84,462,796,800 B) | trains |
 | H100 | 18 | 85,008,752,640 | admitted | **rejected** | `cudaMalloc` out of memory |
 
 B=18 needs 0.65% more memory than the H100 lets a process allocate. Vx's fleet file declares 80 GiB
@@ -95,12 +95,11 @@ of scattering, because Vx has no atomics.
 
 ## Limits and workarounds
 
-- **Speed.** The GPU program is correct, but not yet fast. One step takes 24 s on both cards: B=4
-  on the L4 and B=17 on the H100. The H100 does 4 times the work in the same time, so the step is
-  a latency chain and not a throughput limit. The likely cause is attention backward. It runs one
-  thread per token (4,096 per layer), and each thread does about 1.2 million dependent
-  multiply-adds. Splitting that work by head is the first fix.
-
+- **Speed.** The GPU program is correct, but not yet fast. The runs above took 24 s per step on both
+  cards: B=4 on the L4 and B=17 on the H100. Almost all of that was one loop from llm.c's CPU code.
+  Softmax backward summed an O(T^2) expression for every row, about T^3/3 multiply-adds per
+  attention head. It now uses the O(T) form from llm.c's CUDA version, and dquery, dkey and dvalue
+  run one thread per head and position. A run on the GPU with this change is still to come.
 - **Machine files.** The program uses the built-in `Topology::GPU` and `Memory::GPU_HBM`: Vx's CUDA
   runtime sends only built-in topologies to a device, so the fleet files' `Topology Device` would
   run on the host. `machines/*.vx` give `GPU_HBM` its capacity, `within: Memory::CPU_DRAM` (kernels
