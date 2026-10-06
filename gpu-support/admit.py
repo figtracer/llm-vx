@@ -10,12 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from entry import entry
+
 ROOT = Path(__file__).resolve().parent.parent
 VXC = ROOT / 'Vx/target/release/vxc'
 BUILD = ROOT / 'build/admit'
-
-# GPT-2 124M.
-L, NH, C, VP, V, MAXT = 12, 12, 768, 50304, 50257, 1024
 
 # name: (fleet file, declared capacity, allocatable bytes measured by vx-fit)
 GPUS = {
@@ -27,14 +26,6 @@ GPUS = {
 }
 
 
-def entry(B, T):
-    BT = B * T
-    args = [L, NH, C, 3 * C, 4 * C, VP, V, MAXT, B, T, BT, L * BT, L * B * NH * T, L * C, L * 3 * C, L * 4 * C]
-    return ('import train_gpu;\nfn main() -> i32 {\n  return run<' + ', '.join(map(str, args)) +
-            '>(1, "data/gpt2_124M.bin", "", "", "data/tiny_shakespeare_train.bin", '
-            '"data/tiny_shakespeare_val.bin", "data/gpt2_tokenizer.bin");\n}\n')
-
-
 def machine(capacity):
     return ('Memory CPU_DRAM {}\nMemory GPU_HBM {\n  within: Memory::CPU_DRAM, capacity: ' + capacity +
             ', bandwidth: 3 TB/s, managed: cached, scope: device\n}\n')
@@ -44,7 +35,7 @@ def verdict(B, T, capacity):
     """Answers (admitted, bytes Vx counted)."""
     BUILD.mkdir(parents=True, exist_ok=True)
     src = BUILD / f'b{B}_t{T}.vx'
-    src.write_text(entry(B, T))
+    src.write_text(entry(1, B, T, 'data'))
     mach = BUILD / f'cap_{capacity.replace(" ", "")}.vx'
     mach.write_text(machine(capacity))
     diag = BUILD / 'diag.json'

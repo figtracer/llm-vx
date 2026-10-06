@@ -4,7 +4,8 @@
 // capacity, and the compiler answers whether this exact program fits that GPU.
 //
 // Mode 0 checks one forward and backward pass and ten AdamW steps against a
-// reference, as test_gpt2.vx does. Mode 1 trains, as train.vx does.
+// reference, as test_gpt2.vx does. Mode 1 trains, as train.vx does. Mode 2 runs
+// five training steps only, for memory and speed measurements.
 //
 // Shapes must be compile-time constants that Vx can match by name, so each
 // extent is its own generic parameter: C3 = 3C, C4 = 4C, BT = B*T,
@@ -138,6 +139,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
   let gen : *mut i32 = gen_tokens.as_mut_ptr();
 
   let mut last_step = 40;
+  if mode == 2 { last_step = 4; }
   if mode == 0 {
     last_step = 9;
     if !map_file(state_path, &mut state_file) || !map_file(losses_path, &mut losses_file) {
@@ -201,7 +203,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
       unsafe {
         for i in 0..BT { hin[i] = gen[i]; }
       }
-    } else if mode == 1 {
+    } else if mode != 0 {
       dataloader_next_batch(&mut train_loader);
     }
     let start = unix_timestamp();
