@@ -80,8 +80,9 @@ python3 gpu-support/admit.py 1024
 GPT-2 124M itself needs llm.c's starter pack in `data/` (`gpt2_124M.bin`,
 `gpt2_124M_debug_state.bin`, `gpt2_tokenizer.bin`, `tiny_shakespeare_{train,val}.bin`); then
 `make train`. On an NVIDIA GPU, `gpu-support/remote.sh` installs the toolchain and builds Vx with
-its CUDA plugin. `gpu-support/rent.py L4 l4` rents a GPU through Fission,
-runs `gpu-support/jobs/l4.sh` there and downloads the logs. Without `--approve` it only prints the
+its CUDA plugin. `gpu-support/rent.py L4 l4` rents a GPU through
+[Fission](https://github.com/figtracer/fission), runs `gpu-support/jobs/l4.sh` there and downloads
+the logs. Without `--approve` it only prints the
 quote.
 
 ## How the GPU program is written
