@@ -1,0 +1,9 @@
+== 16:01:02 machine
+1
+MemTotal:       356098752 kB
+none            8.0E   96K  8.0E   1% /
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+NVIDIA L4, 23034 MiB, 580.95.05, 8.9
+== 16:01:03 apt
+E: Unable to locate package software-properties-common

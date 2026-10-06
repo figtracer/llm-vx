@@ -26,8 +26,11 @@ export DEBIAN_FRONTEND=noninteractive
 log apt
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build pkg-config git curl \
-  wget ca-certificates gnupg lsb-release software-properties-common libffi-dev zlib1g-dev libzstd-dev \
+  wget ca-certificates gnupg lsb-release libffi-dev zlib1g-dev libzstd-dev \
   libedit-dev libxml2-dev z3 libz3-dev python3-pip >/dev/null
+# LLVM's installer needs add-apt-repository before Debian 13 only; the package
+# that provides it is gone from Debian 13, which Modal's image runs.
+apt-get install -y -qq --no-install-recommends software-properties-common >/dev/null 2>&1 || true
 
 log llvm 22
 wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
