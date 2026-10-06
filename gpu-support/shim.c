@@ -18,11 +18,21 @@ static void check(cudaError_t err, const char* what) {
     }
 }
 
+// VX_TF32=1 turns on TF32 tensor cores for these GEMMs, as it does for Vx's
+// own (runtime/cuda_dispatch.cpp) and as llm.c's train_gpt2_fp32.cu does on
+// Ampere and later. Off by default: it changes the numbers.
 void* vx_cublas(void) {
     static cublasHandle_t handle = NULL;
-    if (handle == NULL && cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "cublasCreate failed\n");
-        exit(1);
+    if (handle == NULL) {
+        if (cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS) {
+            fprintf(stderr, "cublasCreate failed\n");
+            exit(1);
+        }
+        const char* tf32 = getenv("VX_TF32");
+        if (tf32 && *tf32 && *tf32 != '0') {
+            cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+            fprintf(stderr, "shim: cuBLAS math mode TF32\n");
+        }
     }
     return handle;
 }

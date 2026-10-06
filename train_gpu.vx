@@ -378,6 +378,9 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
     unsafe { vx_zero_f32(v_fcprojb.as_mut_ptr(), (LC as i64) * (1 as i64)); }
     unsafe { vx_zero_f32(v_lnfw.as_mut_ptr(), (C as i64) * (1 as i64)); }
     unsafe { vx_zero_f32(v_lnfb.as_mut_ptr(), (C as i64) * (1 as i64)); }
+  // d_losses is in llm.c's layout, but nothing reads it here: it holds the
+  // column of ones the bias additions multiply by.
+  k_fill<BT, 1>(&mut d_losses, 1.0);
 
   // Host buffers: the next batch, the losses and one row of probabilities.
   let mut host_inputs = Tensor<i32>([BT]);
@@ -515,7 +518,10 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
         cublas_matmul_forward(vx_dev_at(qkv.as_mut_ptr(), lo64 * (C3 as i64)), vx_dev_at(ln1.as_mut_ptr(), lo64 * (C as i64)),
                        vx_dev_at(qkvw.as_mut_ptr(), l64 * (C3 as i64) * (C as i64)), BT, C, C3);
       }
-      k_add_bias<LBT, C3, LC3>(&mut qkv, &qkvb, l * C3, lo, BT);
+      unsafe {
+        cublas_add_bias(vx_dev_at(qkv.as_mut_ptr(), lo64 * (C3 as i64)), vx_dev_at(qkvb.as_mut_ptr(), l64 * (C3 as i64)),
+                        d_losses.as_mut_ptr(), BT, C3);
+      }
       let a0 = phase_time(mode);
       k_attention_scores<RA, T, LBT, C3>(&mut preatt, &mut att, &qkv, NH, BT, l, scale, l * B * NH * T, B * NH * T);
       // preatt is dead from here on, so the output per head goes through it.
@@ -526,7 +532,10 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
         cublas_matmul_forward(vx_dev_at(attproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(atty.as_mut_ptr(), lo64 * (C as i64)),
                        vx_dev_at(attprojw.as_mut_ptr(), l64 * (C as i64) * (C as i64)), BT, C, C);
       }
-      k_add_bias<LBT, C, LC>(&mut attproj, &attprojb, l * C, lo, BT);
+      unsafe {
+        cublas_add_bias(vx_dev_at(attproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(attprojb.as_mut_ptr(), l64 * (C as i64)),
+                        d_losses.as_mut_ptr(), BT, C);
+      }
       if l == 0 {
         k_add<LBT, C, BT, LBT>(&mut residual2, &encoded, &attproj, 0, lo, lo, BT);
       } else {
@@ -538,13 +547,19 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
         cublas_matmul_forward(vx_dev_at(fch.as_mut_ptr(), lo64 * (C4 as i64)), vx_dev_at(ln2.as_mut_ptr(), lo64 * (C as i64)),
                        vx_dev_at(fcw.as_mut_ptr(), l64 * (C4 as i64) * (C as i64)), BT, C, C4);
       }
-      k_add_bias<LBT, C4, LC4>(&mut fch, &fcb, l * C4, lo, BT);
+      unsafe {
+        cublas_add_bias(vx_dev_at(fch.as_mut_ptr(), lo64 * (C4 as i64)), vx_dev_at(fcb.as_mut_ptr(), l64 * (C4 as i64)),
+                        d_losses.as_mut_ptr(), BT, C4);
+      }
       k_gelu_forward<LBT, C4>(&mut fch_gelu, &fch, s, lo, BT);
       unsafe {
         cublas_matmul_forward(vx_dev_at(fcproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(fch_gelu.as_mut_ptr(), lo64 * (C4 as i64)),
                        vx_dev_at(fcprojw.as_mut_ptr(), l64 * (C as i64) * (C4 as i64)), BT, C4, C);
       }
-      k_add_bias<LBT, C, LC>(&mut fcproj, &fcprojb, l * C, lo, BT);
+      unsafe {
+        cublas_add_bias(vx_dev_at(fcproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(fcprojb.as_mut_ptr(), l64 * (C as i64)),
+                        d_losses.as_mut_ptr(), BT, C);
+      }
       k_add<LBT, C, LBT, LBT>(&mut residual3, &residual2, &fcproj, lo, lo, lo, BT);
     }
     k_layernorm_forward<BT, LBT, C, C>(&mut lnf, &mut lnf_mean, &mut lnf_rstd, &residual3, &lnfw, &lnfb,

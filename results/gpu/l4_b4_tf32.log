@@ -21,17 +21,18 @@ LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is no
 [JIT] Linking native executable...
 [JIT] Executing native binary...
 [GPT-2 on GPU, train]
-step 0: train loss 10.824956 (took 1500.7843971252441 ms)
-  forward 704.4906616210938 ms, attention 271.38566970825195 ms; backward 720.1061248779297 ms, attention 328.0816078186035 ms
-step 1: train loss 10.82474 (took 1226.8075942993164 ms)
-  forward 508.0528259277344 ms, attention 260.7302665710449 ms; backward 678.4610748291016 ms, attention 327.070951461792 ms
-step 2: train loss 10.824699 (took 1229.1345596313477 ms)
-  forward 507.2479248046875 ms, attention 263.03696632385254 ms; backward 681.1103820800781 ms, attention 331.2239646911621 ms
-step 3: train loss 10.824813 (took 1208.7712287902832 ms)
-  forward 497.1461296081543 ms, attention 265.2556896209717 ms; backward 671.1776256561279 ms, attention 323.5037326812744 ms
-step 4: train loss 10.825045 (took 1222.7675914764404 ms)
-  forward 504.53853607177734 ms, attention 261.95693016052246 ms; backward 677.7052879333496 ms, attention 327.64315605163574 ms
+step 0: train loss 10.824958 (took 1393.7633037567139 ms)
+  forward 672.3380088806152 ms, attention 265.03920555114746 ms; backward 645.594596862793 ms, attention 321.38919830322266 ms
+step 1: train loss 10.824741 (took 1072.0958709716797 ms)
+  forward 436.31696701049805 ms, attention 256.20245933532715 ms; backward 595.219612121582 ms, attention 316.62726402282715 ms
+step 2: train loss 10.8247 (took 1072.9362964630127 ms)
+  forward 438.56024742126465 ms, attention 258.9263916015625 ms; backward 593.9979553222656 ms, attention 318.2086944580078 ms
+step 3: train loss 10.824815 (took 1138.5698318481445 ms)
+  forward 509.052038192749 ms, attention 267.32516288757324 ms; backward 588.9949798583984 ms, attention 314.15319442749023 ms
+step 4: train loss 10.825045 (took 1063.239574432373 ms)
+  forward 434.8797798156738 ms, attention 255.2187442779541 ms; backward 588.1381034851074 ms, attention 313.14897537231445 ms
 
 [Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
   Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
   Declare the space `managed: explicit` and the compiler will require the transfer home, or keep the operands in a space the host can read.
+shim: cuBLAS math mode TF32
