@@ -1,3 +1,5 @@
 build/
 data/
-results/runs/*/*.tgz
+results/runs/
+notes/
+__pycache__/
