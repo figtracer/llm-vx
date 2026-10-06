@@ -21,3 +21,24 @@ VX_TIME_KERNEL=1 $VXC build/bench_b4.vx --machine machines/l4.vx -O3 > build/ben
 $VXC build/bench_b4.vx --machine machines/l4.vx -O3 --action emit-llvm > build/bench_b4.ll 2>/dev/null
 python3 gpu-support/kernel_times.py build/bench_b4.ll build/bench_b4_timed.log --steps 5 | tee $OUT/kernel_times.txt
 grep 'step ' build/bench_b4_timed.log | tail -2
+# The reference: llm.c's own fp32 CUDA trainer on the same model and data,
+# built with nvcc from NVIDIA's wheel. It turns TF32 on by itself on Ampere and
+# later, so compare it with the VX_TF32=1 run.
+NV=$(python3 -c 'import nvidia; print(list(nvidia.__path__)[0])')
+if [ -x "$NV/cuda_nvcc/bin/nvcc" ]; then
+  mkdir -p build/llmc_cuda && cd build/llmc_cuda
+  ln -sf ../rnd124/model.bin gpt2_124M.bin
+  ln -sf ../rnd124/tokenizer.bin gpt2_tokenizer.bin
+  PATH=$NV/cuda_nvcc/bin:$PATH nvcc --threads=0 --use_fast_math -std=c++17 -O3 -arch=native -I../../llm.c \
+    -I/opt/cuda/include ../../llm.c/train_gpt2_fp32.cu -L/opt/cuda/lib64 -lcublas -lcublasLt -cudart shared \
+    -o train_gpt2fp32cu > $OUT/llmc_cuda_build.log 2>&1
+  echo "llm.c build exit $?"
+  tail -5 $OUT/llmc_cuda_build.log
+  ./train_gpt2fp32cu -i ../rnd124/train_tokens.bin -j ../rnd124/val_tokens.bin -v 1000 -s 1000 > $OUT/llmc_cuda.log 2>&1
+  echo "llm.c run exit $?"
+  grep 'step \|TF32' $OUT/llmc_cuda.log | tail -12
+  cd ../..
+else
+  echo "no nvcc in $NV/cuda_nvcc/bin"
+  ls $NV/cuda_nvcc/bin 2>&1 | head
+fi

@@ -97,7 +97,7 @@ def main():
                 check=False)
         # Downloads come back 48 KB per paid call, so only small text results.
         for remote in ['test_gpu_small.log', 'vx_gpu_train.txt', 'compare_small.txt', 'probe.txt',
-                       'kernel_times.txt', 'bench_b4_tf32.log',
+                       'kernel_times.txt', 'bench_b4_tf32.log', 'llmc_cuda.log', 'llmc_cuda_build.log',
                        *[f'bench_b{b}.log' for b in (4, 5, 17, 18)]]:
             fission('download', name, f'/workspace/out/{remote}', str(out / remote), check=False)
     except Exception:

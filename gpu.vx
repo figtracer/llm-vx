@@ -142,175 +142,6 @@ fn k_layernorm_forward<const R : i32, const RI : i32, const C : i32, const RW : 
   return;
 }
 
-// Attention scores for one (batch, head, position): q . k for each key at or
-// before it, scaled, then the softmax over them. One thread per row of att.
-// hs must be a multiple of 16.
-fn k_attention_scores<const RA : i32, const T : i32, const R : i32, const C3 : i32>(
-    preatt : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, att : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>,
-    qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>, NH : i32, BT : i32, l : i32, scale : f32,
-    lo : i32, n : i32) -> void {
-  let C = C3 / 3;
-  let hs = C / NH;
-  spawn on(Topology::GPU) {
-    for r in 0..RA {
-      if r >= lo && r < lo + n {
-        let rr = r - lo;
-        let b = rr / (NH * T);
-        let h = (rr / T) % NH;
-        let t = rr % T;
-        let qrow = l * BT + b * T + t;
-        let row0 = l * BT + b * T;
-        // q . k for each key, 16 query components at a time: those 16 stay in
-        // registers, and each key's partial sum waits in preatt between passes.
-        // The sum still runs over the components in order.
-        for chunk in 0..(hs / 16) {
-          let c = h * hs + chunk * 16;
-          let q0 = qkv[qrow][c];
-          let q1 = qkv[qrow][c + 1];
-          let q2 = qkv[qrow][c + 2];
-          let q3 = qkv[qrow][c + 3];
-          let q4 = qkv[qrow][c + 4];
-          let q5 = qkv[qrow][c + 5];
-          let q6 = qkv[qrow][c + 6];
-          let q7 = qkv[qrow][c + 7];
-          let q8 = qkv[qrow][c + 8];
-          let q9 = qkv[qrow][c + 9];
-          let q10 = qkv[qrow][c + 10];
-          let q11 = qkv[qrow][c + 11];
-          let q12 = qkv[qrow][c + 12];
-          let q13 = qkv[qrow][c + 13];
-          let q14 = qkv[qrow][c + 14];
-          let q15 = qkv[qrow][c + 15];
-          for t2 in 0..(t + 1) {
-            let k = row0 + t2;
-            let mut val : f32 = 0.0;
-            if chunk > 0 { val = preatt[r][t2]; }
-            val = val + q0 * qkv[k][C + c];
-            val = val + q1 * qkv[k][C + c + 1];
-            val = val + q2 * qkv[k][C + c + 2];
-            val = val + q3 * qkv[k][C + c + 3];
-            val = val + q4 * qkv[k][C + c + 4];
-            val = val + q5 * qkv[k][C + c + 5];
-            val = val + q6 * qkv[k][C + c + 6];
-            val = val + q7 * qkv[k][C + c + 7];
-            val = val + q8 * qkv[k][C + c + 8];
-            val = val + q9 * qkv[k][C + c + 9];
-            val = val + q10 * qkv[k][C + c + 10];
-            val = val + q11 * qkv[k][C + c + 11];
-            val = val + q12 * qkv[k][C + c + 12];
-            val = val + q13 * qkv[k][C + c + 13];
-            val = val + q14 * qkv[k][C + c + 14];
-            val = val + q15 * qkv[k][C + c + 15];
-            preatt[r][t2] = val;
-          }
-        }
-        let mut maxval : f32 = -10000.0;
-        for t2 in 0..(t + 1) {
-          let val = preatt[r][t2] * scale;
-          if val > maxval { maxval = val; }
-          preatt[r][t2] = val;
-        }
-        let mut expsum : f32 = 0.0;
-        for t2 in 0..(t + 1) {
-          let expv = (preatt[r][t2] - maxval).exp();
-          expsum = expsum + expv;
-          att[r][t2] = expv;
-        }
-        let mut expsum_inv : f32 = 0.0;
-        if expsum != 0.0 { expsum_inv = 1.0 / expsum; }
-        for t2 in 0..T {
-          if t2 <= t {
-            att[r][t2] = att[r][t2] * expsum_inv;
-          } else {
-            att[r][t2] = 0.0;
-          }
-        }
-      }
-    }
-  }
-  return;
-}
-
-// The attention output of one (batch, head, position): out[i] = the sum over
-// t2 <= t of att[t2] * value[t2][i], into the first hs columns of that row of
-// `scratch`. The caller passes preatt, which nothing reads once att is computed.
-// One thread per row of att, and 16 outputs per pass over the row, so the row
-// is read hs / 16 times. hs must be a multiple of 16.
-fn k_attention_out_head<const RA : i32, const T : i32, const R : i32, const C3 : i32>(
-    scratch : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, att : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
-    qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>, NH : i32, BT : i32, l : i32, lo : i32, n : i32) -> void {
-  let C = C3 / 3;
-  let hs = C / NH;
-  spawn on(Topology::GPU) {
-    for r in 0..RA {
-      if r >= lo && r < lo + n {
-        let rr = r - lo;
-        let b = rr / (NH * T);
-        let h = (rr / T) % NH;
-        let t = rr % T;
-        let row0 = l * BT + b * T;
-        for chunk in 0..(hs / 16) {
-          let i0 = chunk * 16;
-          let c = C * 2 + h * hs + i0;
-          let mut s0 : f32 = 0.0;
-          let mut s1 : f32 = 0.0;
-          let mut s2 : f32 = 0.0;
-          let mut s3 : f32 = 0.0;
-          let mut s4 : f32 = 0.0;
-          let mut s5 : f32 = 0.0;
-          let mut s6 : f32 = 0.0;
-          let mut s7 : f32 = 0.0;
-          let mut s8 : f32 = 0.0;
-          let mut s9 : f32 = 0.0;
-          let mut s10 : f32 = 0.0;
-          let mut s11 : f32 = 0.0;
-          let mut s12 : f32 = 0.0;
-          let mut s13 : f32 = 0.0;
-          let mut s14 : f32 = 0.0;
-          let mut s15 : f32 = 0.0;
-          for t2 in 0..(t + 1) {
-            let w = att[r][t2];
-            let v = row0 + t2;
-            s0 = s0 + w * qkv[v][c];
-            s1 = s1 + w * qkv[v][c + 1];
-            s2 = s2 + w * qkv[v][c + 2];
-            s3 = s3 + w * qkv[v][c + 3];
-            s4 = s4 + w * qkv[v][c + 4];
-            s5 = s5 + w * qkv[v][c + 5];
-            s6 = s6 + w * qkv[v][c + 6];
-            s7 = s7 + w * qkv[v][c + 7];
-            s8 = s8 + w * qkv[v][c + 8];
-            s9 = s9 + w * qkv[v][c + 9];
-            s10 = s10 + w * qkv[v][c + 10];
-            s11 = s11 + w * qkv[v][c + 11];
-            s12 = s12 + w * qkv[v][c + 12];
-            s13 = s13 + w * qkv[v][c + 13];
-            s14 = s14 + w * qkv[v][c + 14];
-            s15 = s15 + w * qkv[v][c + 15];
-          }
-          scratch[r][i0] = s0;
-          scratch[r][i0 + 1] = s1;
-          scratch[r][i0 + 2] = s2;
-          scratch[r][i0 + 3] = s3;
-          scratch[r][i0 + 4] = s4;
-          scratch[r][i0 + 5] = s5;
-          scratch[r][i0 + 6] = s6;
-          scratch[r][i0 + 7] = s7;
-          scratch[r][i0 + 8] = s8;
-          scratch[r][i0 + 9] = s9;
-          scratch[r][i0 + 10] = s10;
-          scratch[r][i0 + 11] = s11;
-          scratch[r][i0 + 12] = s12;
-          scratch[r][i0 + 13] = s13;
-          scratch[r][i0 + 14] = s14;
-          scratch[r][i0 + 15] = s15;
-        }
-      }
-    }
-  }
-  return;
-}
-
 // out = the attention output, for rows [lo, lo + n) of out: each position
 // collects its heads from `scratch`.
 fn k_attention_out_gather<const R : i32, const C : i32, const RA : i32, const T : i32>(
@@ -377,25 +208,49 @@ fn k_gelu_forward<const R : i32, const C : i32>(out : &mut Tensor<f32, [R, C], M
   return;
 }
 
-fn k_softmax_forward<const BT : i32, const VP : i32>(probs : &mut Tensor<f32, [BT, VP], Memory::GPU_HBM>,
-    logits : &Tensor<f32, [BT, VP], Memory::GPU_HBM>, V : i32) -> void {
+// Each row's max and sum of exp(x - max) over its V real columns, for the
+// softmax. logits is 32 wide: row r is view rows r * VP / 32 onwards. One thread
+// per row, summing in column order as llm.c does.
+fn k_softmax_stats<const RW : i32, const BT : i32>(maxes : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>,
+    sums : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>, logits : &Tensor<f32, [RW, 32], Memory::GPU_HBM>,
+    V : i32, VP : i32) -> void {
+  let per_row = VP / 32;
   spawn on(Topology::GPU) {
     for r in 0..BT {
+      let row0 = r * per_row;
       let mut maxval : f32 = -10000.0;
       for i in 0..V {
-        if logits[r][i] > maxval { maxval = logits[r][i]; }
+        let x = logits[row0 + i / 32][i % 32];
+        if x > maxval { maxval = x; }
       }
       let mut sum : f32 = 0.0;
       for i in 0..V {
-        let e = (logits[r][i] - maxval).exp();
-        probs[r][i] = e;
-        sum = sum + e;
+        sum = sum + (logits[row0 + i / 32][i % 32] - maxval).exp();
       }
-      for i in 0..VP {
-        if i < V {
-          probs[r][i] = probs[r][i] / sum;
+      maxes[r][0] = maxval;
+      sums[r][0] = sum;
+    }
+  }
+  return;
+}
+
+// probs = exp(logits - max) / sum, 32 elements per thread, and 0 in the padded
+// columns from V on.
+fn k_softmax_forward<const RW : i32, const BT : i32>(probs : &mut Tensor<f32, [RW, 32], Memory::GPU_HBM>,
+    logits : &Tensor<f32, [RW, 32], Memory::GPU_HBM>, maxes : &Tensor<f32, [BT, 1], Memory::GPU_HBM>,
+    sums : &Tensor<f32, [BT, 1], Memory::GPU_HBM>, V : i32, VP : i32) -> void {
+  let per_row = VP / 32;
+  spawn on(Topology::GPU) {
+    for r in 0..RW {
+      let row = r / per_row;
+      let c0 = (r % per_row) * 32;
+      let maxval = maxes[row][0];
+      let sum = sums[row][0];
+      for c in 0..32 {
+        if c0 + c < V {
+          probs[r][c] = (logits[r][c] - maxval).exp() / sum;
         } else {
-          probs[r][i] = 0.0;
+          probs[r][c] = 0.0;
         }
       }
     }
@@ -403,26 +258,38 @@ fn k_softmax_forward<const BT : i32, const VP : i32>(probs : &mut Tensor<f32, [B
   return;
 }
 
-fn k_crossentropy_forward<const BT : i32, const VP : i32>(losses : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>,
-    probs : &Tensor<f32, [BT, VP], Memory::GPU_HBM>, targets : &Tensor<i32, [BT, 1], Memory::GPU_HBM>) -> void {
+// losses = -log(probs[target]), with probs 32 wide.
+fn k_crossentropy_forward<const BT : i32, const RW : i32>(losses : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>,
+    probs : &Tensor<f32, [RW, 32], Memory::GPU_HBM>, targets : &Tensor<i32, [BT, 1], Memory::GPU_HBM>,
+    VP : i32) -> void {
+  let per_row = VP / 32;
   spawn on(Topology::GPU) {
     for r in 0..BT {
-      losses[r][0] = 0.0 - probs[r][targets[r][0]].ln();
+      let ix = targets[r][0];
+      losses[r][0] = 0.0 - probs[r * per_row + ix / 32][ix % 32].ln();
     }
   }
   return;
 }
 
-fn k_crossentropy_softmax_backward<const BT : i32, const VP : i32>(
-    dlogits : &mut Tensor<f32, [BT, VP], Memory::GPU_HBM>, probs : &Tensor<f32, [BT, VP], Memory::GPU_HBM>,
-    targets : &Tensor<i32, [BT, 1], Memory::GPU_HBM>, dloss : f32, V : i32) -> void {
+// dlogits += (probs - onehot(target)) * dloss over the V real columns, on the
+// 32-wide tensors: view row r is part of row r / (VP / 32), from column
+// (r % (VP / 32)) * 32.
+fn k_crossentropy_softmax_backward<const RW : i32, const BT : i32>(
+    dlogits : &mut Tensor<f32, [RW, 32], Memory::GPU_HBM>, probs : &Tensor<f32, [RW, 32], Memory::GPU_HBM>,
+    targets : &Tensor<i32, [BT, 1], Memory::GPU_HBM>, dloss : f32, V : i32, VP : i32) -> void {
+  let per_row = VP / 32;
   spawn on(Topology::GPU) {
-    for r in 0..BT {
-      let ix = targets[r][0];
-      for i in 0..V {
-        let mut indicator : f32 = 0.0;
-        if i == ix { indicator = 1.0; }
-        dlogits[r][i] = dlogits[r][i] + (probs[r][i] - indicator) * dloss;
+    for r in 0..RW {
+      let ix = targets[r / per_row][0];
+      let c0 = (r % per_row) * 32;
+      for c in 0..32 {
+        let i = c0 + c;
+        if i < V {
+          let mut indicator : f32 = 0.0;
+          if i == ix { indicator = 1.0; }
+          dlogits[r][c] = dlogits[r][c] + (probs[r][c] - indicator) * dloss;
+        }
       }
     }
   }
@@ -439,6 +306,25 @@ fn k_bias_backward<const RB : i32, const R : i32, const OC : i32>(
         let o = r - b_lo;
         let mut sum : f32 = 0.0;
         for bt in 0..BT { sum = sum + dout[d_lo + bt][o]; }
+        dbias[r][0] = dbias[r][0] + sum;
+      }
+    }
+  }
+  return;
+}
+
+// k_bias_backward for a 32-wide dout: element (row, o) is at
+// [row * (OC / 32) + o / 32][o % 32], the same place in memory.
+fn k_bias_backward_wide<const RB : i32, const RW : i32>(
+    dbias : &mut Tensor<f32, [RB, 1], Memory::GPU_HBM>, dout : &Tensor<f32, [RW, 32], Memory::GPU_HBM>,
+    b_lo : i32, d_lo : i32, BT : i32, OC : i32) -> void {
+  let per_row = OC / 32;
+  spawn on(Topology::GPU) {
+    for r in 0..RB {
+      if r >= b_lo && r < b_lo + OC {
+        let o = r - b_lo;
+        let mut sum : f32 = 0.0;
+        for bt in 0..BT { sum = sum + dout[(d_lo + bt) * per_row + o / 32][o % 32]; }
         dbias[r][0] = dbias[r][0] + sum;
       }
     }
@@ -524,216 +410,6 @@ fn k_gelu_backward<const R : i32, const C : i32>(dinp : &mut Tensor<f32, [R, C],
           let sech_out = 1.0 - tanh_out * tanh_out;
           let local_grad = 0.5 * (1.0 + tanh_out) + x * 0.5 * sech_out * s * (1.0 + 3.0 * 0.044715 * x * x);
           dinp[r][c] = dinp[r][c] + local_grad * dout[r][c];
-        }
-      }
-    }
-  }
-  return;
-}
-
-// For one query position: datt from the values, then dpreatt through the softmax.
-// Both are assigned, not accumulated, so neither needs zeroing before a step.
-// Entries above the diagonal stay as they are; nothing reads them.
-fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, const C3 : i32, const C : i32>(
-    dpreatt : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, datt : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>,
-    att : &Tensor<f32, [RA, T], Memory::GPU_HBM>, qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>,
-    dout : &Tensor<f32, [R, C], Memory::GPU_HBM>, NH : i32, BT : i32, l : i32, lo : i32, n : i32) -> void {
-  let hs = C / NH;
-  spawn on(Topology::GPU) {
-    for r in 0..RA {
-      if r >= lo && r < lo + n {
-        let rr = r - lo;
-        let b = rr / (NH * T);
-        let h = (rr / T) % NH;
-        let t = rr % T;
-        let o = l * BT + b * T + t;
-        let row0 = l * BT + b * T;
-        // datt[t2] = value[t2] . dout, 16 components of dout at a time in
-        // registers, as in the forward scores.
-        for chunk in 0..(hs / 16) {
-          let c = h * hs + chunk * 16;
-          let d0 = dout[o][c];
-          let d1 = dout[o][c + 1];
-          let d2 = dout[o][c + 2];
-          let d3 = dout[o][c + 3];
-          let d4 = dout[o][c + 4];
-          let d5 = dout[o][c + 5];
-          let d6 = dout[o][c + 6];
-          let d7 = dout[o][c + 7];
-          let d8 = dout[o][c + 8];
-          let d9 = dout[o][c + 9];
-          let d10 = dout[o][c + 10];
-          let d11 = dout[o][c + 11];
-          let d12 = dout[o][c + 12];
-          let d13 = dout[o][c + 13];
-          let d14 = dout[o][c + 14];
-          let d15 = dout[o][c + 15];
-          for t2 in 0..(t + 1) {
-            let v = row0 + t2;
-            let mut acc : f32 = 0.0;
-            if chunk > 0 { acc = datt[r][t2]; }
-            acc = acc + qkv[v][C * 2 + c] * d0;
-            acc = acc + qkv[v][C * 2 + c + 1] * d1;
-            acc = acc + qkv[v][C * 2 + c + 2] * d2;
-            acc = acc + qkv[v][C * 2 + c + 3] * d3;
-            acc = acc + qkv[v][C * 2 + c + 4] * d4;
-            acc = acc + qkv[v][C * 2 + c + 5] * d5;
-            acc = acc + qkv[v][C * 2 + c + 6] * d6;
-            acc = acc + qkv[v][C * 2 + c + 7] * d7;
-            acc = acc + qkv[v][C * 2 + c + 8] * d8;
-            acc = acc + qkv[v][C * 2 + c + 9] * d9;
-            acc = acc + qkv[v][C * 2 + c + 10] * d10;
-            acc = acc + qkv[v][C * 2 + c + 11] * d11;
-            acc = acc + qkv[v][C * 2 + c + 12] * d12;
-            acc = acc + qkv[v][C * 2 + c + 13] * d13;
-            acc = acc + qkv[v][C * 2 + c + 14] * d14;
-            acc = acc + qkv[v][C * 2 + c + 15] * d15;
-            datt[r][t2] = acc;
-          }
-        }
-        // Softmax backward in O(T), as llm.c's CUDA version computes it:
-        // dpreatt[t3] = att[t3] * (datt[t3] - sum over t2 of att[t2] * datt[t2]).
-        // llm.c's CPU code sums the O(T^2) form, which differs only in rounding
-        // and costs about T^3 / 3 multiply-adds per head.
-        let mut dot : f32 = 0.0;
-        for t2 in 0..(t + 1) { dot = dot + att[r][t2] * datt[r][t2]; }
-        for t3 in 0..(t + 1) {
-          dpreatt[r][t3] = att[r][t3] * (datt[r][t3] - dot);
-        }
-      }
-    }
-  }
-  return;
-}
-
-// One part of dqkv (0 dquery, 1 dkey, 2 dvalue) for one (batch, head, position),
-// into the first hs columns of that row of `scratch`. The caller passes datt,
-// which no later kernel reads. One thread per row of att: twelve times as many
-// threads as one per position. dquery sums over the keys before the position,
-// dkey and dvalue over the queries at or after it. The second loop runs over
-// every query and skips the earlier ones, so a warp reads one row of att and
-// dpreatt at a time. 16 outputs per pass, so each row or column is read hs / 16
-// times. hs must be a multiple of 16.
-fn k_attention_backward_part<const RA : i32, const T : i32, const R : i32, const C3 : i32, const C : i32>(
-    scratch : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, dpreatt : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
-    att : &Tensor<f32, [RA, T], Memory::GPU_HBM>, qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>,
-    dout : &Tensor<f32, [R, C], Memory::GPU_HBM>, NH : i32, BT : i32, l : i32, scale : f32, part : i32,
-    lo : i32, n : i32) -> void {
-  let hs = C / NH;
-  spawn on(Topology::GPU) {
-    for r in 0..RA {
-      if r >= lo && r < lo + n {
-        let rr = r - lo;
-        let b = rr / (NH * T);
-        let h = (rr / T) % NH;
-        let t = rr % T;
-        let arow = lo + b * NH * T + h * T;
-        let row0 = l * BT + b * T;
-        for chunk in 0..(hs / 16) {
-          let i0 = chunk * 16;
-          let mut s0 : f32 = 0.0;
-          let mut s1 : f32 = 0.0;
-          let mut s2 : f32 = 0.0;
-          let mut s3 : f32 = 0.0;
-          let mut s4 : f32 = 0.0;
-          let mut s5 : f32 = 0.0;
-          let mut s6 : f32 = 0.0;
-          let mut s7 : f32 = 0.0;
-          let mut s8 : f32 = 0.0;
-          let mut s9 : f32 = 0.0;
-          let mut s10 : f32 = 0.0;
-          let mut s11 : f32 = 0.0;
-          let mut s12 : f32 = 0.0;
-          let mut s13 : f32 = 0.0;
-          let mut s14 : f32 = 0.0;
-          let mut s15 : f32 = 0.0;
-          if part == 0 {
-            let c = C + h * hs + i0;
-            for t2 in 0..(t + 1) {
-              let d = dpreatt[r][t2];
-              let k = row0 + t2;
-              s0 = s0 + qkv[k][c] * d * scale;
-              s1 = s1 + qkv[k][c + 1] * d * scale;
-              s2 = s2 + qkv[k][c + 2] * d * scale;
-              s3 = s3 + qkv[k][c + 3] * d * scale;
-              s4 = s4 + qkv[k][c + 4] * d * scale;
-              s5 = s5 + qkv[k][c + 5] * d * scale;
-              s6 = s6 + qkv[k][c + 6] * d * scale;
-              s7 = s7 + qkv[k][c + 7] * d * scale;
-              s8 = s8 + qkv[k][c + 8] * d * scale;
-              s9 = s9 + qkv[k][c + 9] * d * scale;
-              s10 = s10 + qkv[k][c + 10] * d * scale;
-              s11 = s11 + qkv[k][c + 11] * d * scale;
-              s12 = s12 + qkv[k][c + 12] * d * scale;
-              s13 = s13 + qkv[k][c + 13] * d * scale;
-              s14 = s14 + qkv[k][c + 14] * d * scale;
-              s15 = s15 + qkv[k][c + 15] * d * scale;
-            }
-          } else if part == 1 {
-            let c = h * hs + i0;
-            for tq in 0..T {
-              if tq >= t {
-                let d = dpreatt[arow + tq][t];
-                let q = row0 + tq;
-                s0 = s0 + qkv[q][c] * d * scale;
-                s1 = s1 + qkv[q][c + 1] * d * scale;
-                s2 = s2 + qkv[q][c + 2] * d * scale;
-                s3 = s3 + qkv[q][c + 3] * d * scale;
-                s4 = s4 + qkv[q][c + 4] * d * scale;
-                s5 = s5 + qkv[q][c + 5] * d * scale;
-                s6 = s6 + qkv[q][c + 6] * d * scale;
-                s7 = s7 + qkv[q][c + 7] * d * scale;
-                s8 = s8 + qkv[q][c + 8] * d * scale;
-                s9 = s9 + qkv[q][c + 9] * d * scale;
-                s10 = s10 + qkv[q][c + 10] * d * scale;
-                s11 = s11 + qkv[q][c + 11] * d * scale;
-                s12 = s12 + qkv[q][c + 12] * d * scale;
-                s13 = s13 + qkv[q][c + 13] * d * scale;
-                s14 = s14 + qkv[q][c + 14] * d * scale;
-                s15 = s15 + qkv[q][c + 15] * d * scale;
-              }
-            }
-          } else {
-            let c = h * hs + i0;
-            for tq in 0..T {
-              if tq >= t {
-                let w = att[arow + tq][t];
-                let q = row0 + tq;
-                s0 = s0 + w * dout[q][c];
-                s1 = s1 + w * dout[q][c + 1];
-                s2 = s2 + w * dout[q][c + 2];
-                s3 = s3 + w * dout[q][c + 3];
-                s4 = s4 + w * dout[q][c + 4];
-                s5 = s5 + w * dout[q][c + 5];
-                s6 = s6 + w * dout[q][c + 6];
-                s7 = s7 + w * dout[q][c + 7];
-                s8 = s8 + w * dout[q][c + 8];
-                s9 = s9 + w * dout[q][c + 9];
-                s10 = s10 + w * dout[q][c + 10];
-                s11 = s11 + w * dout[q][c + 11];
-                s12 = s12 + w * dout[q][c + 12];
-                s13 = s13 + w * dout[q][c + 13];
-                s14 = s14 + w * dout[q][c + 14];
-                s15 = s15 + w * dout[q][c + 15];
-              }
-            }
-          }
-          scratch[r][i0] = s0;
-          scratch[r][i0 + 1] = s1;
-          scratch[r][i0 + 2] = s2;
-          scratch[r][i0 + 3] = s3;
-          scratch[r][i0 + 4] = s4;
-          scratch[r][i0 + 5] = s5;
-          scratch[r][i0 + 6] = s6;
-          scratch[r][i0 + 7] = s7;
-          scratch[r][i0 + 8] = s8;
-          scratch[r][i0 + 9] = s9;
-          scratch[r][i0 + 10] = s10;
-          scratch[r][i0 + 11] = s11;
-          scratch[r][i0 + 12] = s12;
-          scratch[r][i0 + 13] = s13;
-          scratch[r][i0 + 14] = s14;
-          scratch[r][i0 + 15] = s15;
         }
       }
     }

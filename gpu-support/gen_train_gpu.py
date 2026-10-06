@@ -13,9 +13,9 @@ acts = [
     ('encoded', 'BT', 'C'), ('ln1', 'LBT', 'C'), ('ln1_mean', 'LBT', '1'), ('ln1_rstd', 'LBT', '1'),
     ('qkv', 'LBT', 'C3'), ('atty', 'LBT', 'C'), ('preatt', 'RA', 'T'), ('att', 'RA', 'T'),
     ('attproj', 'LBT', 'C'), ('residual2', 'LBT', 'C'), ('ln2', 'LBT', 'C'), ('ln2_mean', 'LBT', '1'),
-    ('ln2_rstd', 'LBT', '1'), ('fch', 'LBT', 'C4'), ('fch_gelu', 'LBT', 'C4'), ('fcproj', 'LBT', 'C'),
+    ('ln2_rstd', 'LBT', '1'), ('fch', 'LBTC4W', '32'), ('fch_gelu', 'LBTC4W', '32'), ('fcproj', 'LBT', 'C'),
     ('residual3', 'LBT', 'C'), ('lnf', 'BT', 'C'), ('lnf_mean', 'BT', '1'), ('lnf_rstd', 'BT', '1'),
-    ('logits', 'BT', 'VP'), ('probs', 'BT', 'VP'), ('losses', 'BT', '1'),
+    ('logits', 'BTVPW', '32'), ('probs', 'BTVPW', '32'), ('losses', 'BT', '1'),
 ]
 
 def decl(prefix, table, load=False):

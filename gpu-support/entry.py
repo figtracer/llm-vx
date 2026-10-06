@@ -9,7 +9,8 @@ import sys
 
 def entry(mode, B, T, data, L=12, NH=12, C=768, V=50257, VP=50304, MAXT=1024):
     BT = B * T
-    shapes = [L, NH, C, 3 * C, 4 * C, VP, V, MAXT, B, T, BT, L * BT, L * B * NH * T, L * C, L * 3 * C, L * 4 * C]
+    shapes = [L, NH, C, 3 * C, 4 * C, VP, V, MAXT, B, T, BT, L * BT, L * B * NH * T, L * C, L * 3 * C, L * 4 * C,
+              L * BT * 4 * C // 32, BT * VP // 32]
     files = [f'"{data}/model.bin"', '""', '""', f'"{data}/train_tokens.bin"', f'"{data}/val_tokens.bin"',
              f'"{data}/tokenizer.bin"']
     return ('import train_gpu;\n\nfn main() -> i32 {\n  return run<' + ', '.join(map(str, shapes)) + '>(' +

@@ -9,8 +9,12 @@
 //
 // Shapes must be compile-time constants that Vx can match by name, so each
 // extent is its own generic parameter: C3 = 3C, C4 = 4C, BT = B*T,
-// LBT = L*B*T, RA = L*B*NH*T, LC = L*C, LC3 = L*3C, LC4 = L*4C.
+// LBT = L*B*T, RA = L*B*NH*T, LC = L*C, LC3 = L*3C, LC4 = L*4C. fch, fch_gelu,
+// logits, probs and their gradients are 32 wide, LBTC4W = L*B*T*4C/32 and
+// BTVPW = B*T*Vp/32 rows, the same bytes in the same order: only elementwise
+// kernels and cuBLAS touch them, and 32 elements per thread beat one row.
 import data;
+import attention;
 import gpu;
 import utils;
 import std::time;
@@ -59,7 +63,8 @@ fn check_close(a : *mut f32, a_off : i64, b : *mut f32, b_off : i64, n : i64, to
 
 fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : i32, const VP : i32,
        const V : i32, const MAXT : i32, const B : i32, const T : i32, const BT : i32, const LBT : i32,
-       const RA : i32, const LC : i32, const LC3 : i32, const LC4 : i32>(
+       const RA : i32, const LC : i32, const LC3 : i32, const LC4 : i32, const LBTC4W : i32,
+       const BTVPW : i32>(
     mode : i32, model_path : *const i8, state_path : *const i8, losses_path : *const i8,
     train_path : *const i8, val_path : *const i8, tokenizer_path : *const i8) -> i32 {
   let consistent = C3 == 3 * C && C4 == 4 * C && BT == B * T && LBT == L * BT && RA == L * B * NH * T
@@ -118,6 +123,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
   let sqrt_hs = unsafe { sqrtf((C / NH) as f32) };
   let scale = (1.0f64 / (sqrt_hs as f64)) as f32;
   let s = gelu_scale();
+  let c4w = C4 / 32;
   let mut mean_loss : f32 = 0.0;
 
   // Mode 0: the reference batch, logits, loss, gradients and ten losses.
@@ -219,6 +225,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
     let start = phase_time(mode);
     let mut t_attn_fwd : f64 = 0.0;
     let mut t_attn_bwd : f64 = 0.0;
+    let mut t_mm : f64 = 0.0;
     unsafe {
       vx_upload_i32(inputs.as_mut_ptr(), hin, BT as i64);
       vx_upload_i32(targets.as_mut_ptr(), htg, BT as i64);
@@ -237,28 +244,36 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
         k_layernorm_forward<LBT, LBT, C, LC>(&mut ln1, &mut ln1_mean, &mut ln1_rstd, &residual3, &ln1w, &ln1b,
                                              lo - BT, l * C, lo, BT);
       }
+      let m0 = phase_time(mode);
       unsafe {
         cublas_matmul_forward(vx_dev_at(qkv.as_mut_ptr(), lo64 * (C3 as i64)), vx_dev_at(ln1.as_mut_ptr(), lo64 * (C as i64)),
                        vx_dev_at(qkvw.as_mut_ptr(), l64 * (C3 as i64) * (C as i64)), BT, C, C3);
       }
+      t_mm = t_mm + phase_time(mode) - m0;
+      let m1 = phase_time(mode);
       unsafe {
         cublas_add_bias(vx_dev_at(qkv.as_mut_ptr(), lo64 * (C3 as i64)), vx_dev_at(qkvb.as_mut_ptr(), l64 * (C3 as i64)),
                         d_losses.as_mut_ptr(), BT, C3);
       }
+      t_mm = t_mm + phase_time(mode) - m1;
       let a0 = phase_time(mode);
       k_attention_scores<RA, T, LBT, C3>(&mut preatt, &mut att, &qkv, NH, BT, l, scale, l * B * NH * T, B * NH * T);
       // preatt is dead from here on, so the output per head goes through it.
       k_attention_out_head<RA, T, LBT, C3>(&mut preatt, &att, &qkv, NH, BT, l, l * B * NH * T, B * NH * T);
       k_attention_out_gather<LBT, C, RA, T>(&mut atty, &preatt, NH, BT, l, lo, BT);
       t_attn_fwd = t_attn_fwd + phase_time(mode) - a0;
+      let m2 = phase_time(mode);
       unsafe {
         cublas_matmul_forward(vx_dev_at(attproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(atty.as_mut_ptr(), lo64 * (C as i64)),
                        vx_dev_at(attprojw.as_mut_ptr(), l64 * (C as i64) * (C as i64)), BT, C, C);
       }
+      t_mm = t_mm + phase_time(mode) - m2;
+      let m3 = phase_time(mode);
       unsafe {
         cublas_add_bias(vx_dev_at(attproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(attprojb.as_mut_ptr(), l64 * (C as i64)),
                         d_losses.as_mut_ptr(), BT, C);
       }
+      t_mm = t_mm + phase_time(mode) - m3;
       if l == 0 {
         k_add<LBT, C, BT, LBT>(&mut residual2, &encoded, &attproj, 0, lo, lo, BT);
       } else {
@@ -266,31 +281,44 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
       }
       k_layernorm_forward<LBT, LBT, C, LC>(&mut ln2, &mut ln2_mean, &mut ln2_rstd, &residual2, &ln2w, &ln2b,
                                            lo, l * C, lo, BT);
+      let m4 = phase_time(mode);
       unsafe {
         cublas_matmul_forward(vx_dev_at(fch.as_mut_ptr(), lo64 * (C4 as i64)), vx_dev_at(ln2.as_mut_ptr(), lo64 * (C as i64)),
                        vx_dev_at(fcw.as_mut_ptr(), l64 * (C4 as i64) * (C as i64)), BT, C, C4);
       }
+      t_mm = t_mm + phase_time(mode) - m4;
+      let m5 = phase_time(mode);
       unsafe {
         cublas_add_bias(vx_dev_at(fch.as_mut_ptr(), lo64 * (C4 as i64)), vx_dev_at(fcb.as_mut_ptr(), l64 * (C4 as i64)),
                         d_losses.as_mut_ptr(), BT, C4);
       }
-      k_gelu_forward<LBT, C4>(&mut fch_gelu, &fch, s, lo, BT);
+      t_mm = t_mm + phase_time(mode) - m5;
+      k_gelu_forward<LBTC4W, 32>(&mut fch_gelu, &fch, s, lo * c4w, BT * c4w);
+      let m6 = phase_time(mode);
       unsafe {
         cublas_matmul_forward(vx_dev_at(fcproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(fch_gelu.as_mut_ptr(), lo64 * (C4 as i64)),
                        vx_dev_at(fcprojw.as_mut_ptr(), l64 * (C as i64) * (C4 as i64)), BT, C4, C);
       }
+      t_mm = t_mm + phase_time(mode) - m6;
+      let m7 = phase_time(mode);
       unsafe {
         cublas_add_bias(vx_dev_at(fcproj.as_mut_ptr(), lo64 * (C as i64)), vx_dev_at(fcprojb.as_mut_ptr(), l64 * (C as i64)),
                         d_losses.as_mut_ptr(), BT, C);
       }
+      t_mm = t_mm + phase_time(mode) - m7;
       k_add<LBT, C, LBT, LBT>(&mut residual3, &residual2, &fcproj, lo, lo, lo, BT);
     }
     k_layernorm_forward<BT, LBT, C, C>(&mut lnf, &mut lnf_mean, &mut lnf_rstd, &residual3, &lnfw, &lnfb,
                                        (L - 1) * BT, 0, 0, BT);
+    let m8 = phase_time(mode);
     unsafe { cublas_matmul_forward(logits.as_mut_ptr(), lnf.as_mut_ptr(), wte.as_mut_ptr(), BT, C, VP); }
-    k_softmax_forward<BT, VP>(&mut probs, &logits, V);
+    t_mm = t_mm + phase_time(mode) - m8;
+    // d_lnf_mean and d_lnf_rstd are in llm.c's layout, but nothing reads them
+    // here: they hold each row's max and sum for the softmax.
+    k_softmax_stats<BTVPW, BT>(&mut d_lnf_mean, &mut d_lnf_rstd, &logits, V, VP);
+    k_softmax_forward<BTVPW, BT>(&mut probs, &logits, &d_lnf_mean, &d_lnf_rstd, V, VP);
     if job != 1 {
-      k_crossentropy_forward<BT, VP>(&mut losses, &probs, &targets);
+      k_crossentropy_forward<BT, BTVPW>(&mut losses, &probs, &targets, VP);
       unsafe { vx_download_f32(hloss, 0, losses.as_mut_ptr(), BT as i64); }
       mean_loss = 0.0;
       unsafe {
@@ -329,11 +357,13 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
       // Backward pass.
 @ZERO_GRAD@
       let dloss : f32 = 1.0 / (BT as f32);
-      k_crossentropy_softmax_backward<BT, VP>(&mut d_logits, &probs, &targets, dloss, V);
+      k_crossentropy_softmax_backward<BTVPW, BT>(&mut d_logits, &probs, &targets, dloss, V, VP);
+      let m9 = phase_time(mode);
       unsafe {
         cublas_matmul_backward(d_lnf.as_mut_ptr(), d_wte.as_mut_ptr(), d_logits.as_mut_ptr(), lnf.as_mut_ptr(),
                         wte.as_mut_ptr(), BT, C, VP);
       }
+      t_mm = t_mm + phase_time(mode) - m9;
       k_layernorm_backward_inp<LBT, C, BT, LBT, C>(&mut d_residual3, &d_lnf, &residual3, &lnfw, &lnf_mean, &lnf_rstd,
                                                    0, (L - 1) * BT, 0, (L - 1) * BT, BT);
       k_layernorm_backward_params<C, BT, C, LBT>(&mut d_lnfw, &mut d_lnfb, &d_lnf, &residual3, &lnf_mean, &lnf_rstd,
@@ -345,6 +375,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
         let l64 = l as i64;
         k_accumulate<LBT, C, LBT>(&mut d_residual2, &d_residual3, lo, lo, BT);
         k_accumulate<LBT, C, LBT>(&mut d_fcproj, &d_residual3, lo, lo, BT);
+        let m10 = phase_time(mode);
         unsafe {
           cublas_matmul_backward(vx_dev_at(d_fch_gelu.as_mut_ptr(), lo64 * (C4 as i64)),
                           vx_dev_at(d_fcprojw.as_mut_ptr(), l64 * (C as i64) * (C4 as i64)),
@@ -352,8 +383,10 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
                           vx_dev_at(fch_gelu.as_mut_ptr(), lo64 * (C4 as i64)),
                           vx_dev_at(fcprojw.as_mut_ptr(), l64 * (C as i64) * (C4 as i64)), BT, C4, C);
         }
+        t_mm = t_mm + phase_time(mode) - m10;
         k_bias_backward<LC, LBT, C>(&mut d_fcprojb, &d_fcproj, l * C, lo, BT);
-        k_gelu_backward<LBT, C4>(&mut d_fch, &fch, &d_fch_gelu, s, lo, BT);
+        k_gelu_backward<LBTC4W, 32>(&mut d_fch, &fch, &d_fch_gelu, s, lo * c4w, BT * c4w);
+        let m11 = phase_time(mode);
         unsafe {
           cublas_matmul_backward(vx_dev_at(d_ln2.as_mut_ptr(), lo64 * (C as i64)),
                           vx_dev_at(d_fcw.as_mut_ptr(), l64 * (C4 as i64) * (C as i64)),
@@ -361,7 +394,8 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
                           vx_dev_at(ln2.as_mut_ptr(), lo64 * (C as i64)),
                           vx_dev_at(fcw.as_mut_ptr(), l64 * (C4 as i64) * (C as i64)), BT, C, C4);
         }
-        k_bias_backward<LC4, LBT, C4>(&mut d_fcb, &d_fch, l * C4, lo, BT);
+        t_mm = t_mm + phase_time(mode) - m11;
+        k_bias_backward_wide<LC4, LBTC4W>(&mut d_fcb, &d_fch, l * C4, lo, BT, C4);
         k_layernorm_backward_inp<LBT, C, LBT, LBT, LC>(&mut d_residual2, &d_ln2, &residual2, &ln2w, &ln2_mean, &ln2_rstd,
                                                        lo, lo, l * C, lo, BT);
         k_layernorm_backward_params<LC, LBT, C, LBT>(&mut d_ln2w, &mut d_ln2b, &d_ln2, &residual2, &ln2_mean, &ln2_rstd,
@@ -372,6 +406,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
           k_accumulate<LBT, C, LBT>(&mut d_residual3, &d_residual2, lo, lo - BT, BT);
         }
         k_accumulate<LBT, C, LBT>(&mut d_attproj, &d_residual2, lo, lo, BT);
+        let m12 = phase_time(mode);
         unsafe {
           cublas_matmul_backward(vx_dev_at(d_atty.as_mut_ptr(), lo64 * (C as i64)),
                           vx_dev_at(d_attprojw.as_mut_ptr(), l64 * (C as i64) * (C as i64)),
@@ -379,6 +414,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
                           vx_dev_at(atty.as_mut_ptr(), lo64 * (C as i64)),
                           vx_dev_at(attprojw.as_mut_ptr(), l64 * (C as i64) * (C as i64)), BT, C, C);
         }
+        t_mm = t_mm + phase_time(mode) - m12;
         k_bias_backward<LC, LBT, C>(&mut d_attprojb, &d_attproj, l * C, lo, BT);
         let a0 = phase_time(mode);
         k_attention_backward_scores<RA, T, LBT, C3, C>(&mut d_preatt, &mut d_att, &att, &qkv, &d_atty, NH, BT, l,
@@ -390,6 +426,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
           k_attention_backward_gather<LBT, C3, RA, T, C>(&mut d_qkv, &d_att, NH, BT, l, part, lo, BT);
         }
         t_attn_bwd = t_attn_bwd + phase_time(mode) - a0;
+        let m13 = phase_time(mode);
         unsafe {
           cublas_matmul_backward(vx_dev_at(d_ln1.as_mut_ptr(), lo64 * (C as i64)),
                           vx_dev_at(d_qkvw.as_mut_ptr(), l64 * (C3 as i64) * (C as i64)),
@@ -397,6 +434,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
                           vx_dev_at(ln1.as_mut_ptr(), lo64 * (C as i64)),
                           vx_dev_at(qkvw.as_mut_ptr(), l64 * (C3 as i64) * (C as i64)), BT, C, C3);
         }
+        t_mm = t_mm + phase_time(mode) - m13;
         k_bias_backward<LC3, LBT, C3>(&mut d_qkvb, &d_qkv, l * C3, lo, BT);
         if l == 0 {
           k_layernorm_backward_inp<BT, C, LBT, BT, LC>(&mut d_encoded, &d_ln1, &encoded, &ln1w, &ln1_mean, &ln1_rstd,
@@ -477,7 +515,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
         if mode == 2 {
           print!("  forward "); print(t_fwd * 1000.0); print!(" ms, attention "); print(t_attn_fwd * 1000.0);
           print!(" ms; backward "); print(t_bwd * 1000.0); print!(" ms, attention "); print(t_attn_bwd * 1000.0);
-          print!(" ms\n");
+          print!(" ms; cuBLAS in both "); print(t_mm * 1000.0); print!(" ms\n");
         }
       }
       step = step + 1;
