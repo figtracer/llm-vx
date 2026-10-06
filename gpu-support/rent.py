@@ -96,14 +96,15 @@ def main():
     finally:
         if failed and args.keep:
             print(f'kept {name} open; close it with: fission advanced close {name} --discard-output')
-            return
-        fission('close', name, '--discard-output', check=False)
-        for _ in range(8):
-            status = fission('status', name, '--refresh', '--json', check=False)
-            if isinstance(status, dict) and status.get('phase') == 'terminated':
-                break
-            time.sleep(20)
-        print('cleanup:', status.get('phase') if isinstance(status, dict) else status)
+        else:
+            fission('close', name, '--discard-output', check=False)
+            for _ in range(8):
+                status = fission('status', name, '--refresh', '--json', check=False)
+                if isinstance(status, dict) and status.get('phase') == 'terminated':
+                    break
+                time.sleep(20)
+            print('cleanup:', status.get('phase') if isinstance(status, dict) else status)
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
