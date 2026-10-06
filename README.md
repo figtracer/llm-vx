@@ -10,9 +10,8 @@
 
 ---
 
-Vx puts memory placement in the type: `Tensor<f32, [R, C], Memory::GPU_HBM>`. llm.vx keeps every
-buffer of a GPT-2 training step in GPU memory, so the compiler can tell whether a batch size fits
-a GPU before you rent one.
+llm.vx trains GPT-2 exactly as llm.c does, written in Vx. Before you rent a GPU, the compiler
+tells you the largest batch that fits on it.
 
 ## Highlights
 
