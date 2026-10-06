@@ -1,0 +1,784 @@
+// GPT-2 forward pass, backward pass and AdamW update, ported from llm.c's
+// train_gpt2.c (https://github.com/karpathy/llm.c). Each kernel keeps llm.c's
+// loop order and arithmetic, so a build without FMA contraction matches the C
+// reference bit for bit.
+//
+// B = batch size, T = sequence length, C = channels, V = vocab size,
+// Vp = padded vocab size, L = layers, NH = heads.
+
+extern "C" {
+  fn expf(x : f32) -> f32;
+  fn logf(x : f32) -> f32;
+  fn sqrtf(x : f32) -> f32;
+  fn tanhf(x : f32) -> f32;
+  fn coshf(x : f32) -> f32;
+  fn powf(x : f32, y : f32) -> f32;
+}
+
+// The address of element `off` of `p`. Vx has no pointer arithmetic, so this
+// takes the address of the element instead.
+fn at(p : *mut f32, off : i64) -> *mut f32 {
+  return unsafe { (&mut p[off]) as *mut f32 };
+}
+
+// ----------------------------------------------------------------------------
+// Layers.
+
+fn encoder_forward(out : *mut f32, inp : *mut i32, wte : *mut f32, wpe : *mut f32,
+                   B : i64, T : i64, C : i64) -> void {
+  unsafe {
+    for b in 0..B {
+      for t in 0..T {
+        let out_bt = b * T * C + t * C;
+        let wte_ix = (inp[b * T + t] as i64) * C;
+        let wpe_t = t * C;
+        for i in 0..C {
+          out[out_bt + i] = wte[wte_ix + i] + wpe[wpe_t + i];
+        }
+      }
+    }
+  }
+}
+
+fn encoder_backward(dwte : *mut f32, dwpe : *mut f32, dout : *mut f32, inp : *mut i32,
+                    B : i64, T : i64, C : i64) -> void {
+  unsafe {
+    for b in 0..B {
+      for t in 0..T {
+        let dout_bt = b * T * C + t * C;
+        let dwte_ix = (inp[b * T + t] as i64) * C;
+        let dwpe_t = t * C;
+        for i in 0..C {
+          let d = dout[dout_bt + i];
+          dwte[dwte_ix + i] = dwte[dwte_ix + i] + d;
+          dwpe[dwpe_t + i] = dwpe[dwpe_t + i] + d;
+        }
+      }
+    }
+  }
+}
+
+fn layernorm_forward(out : *mut f32, mean : *mut f32, rstd : *mut f32, inp : *mut f32,
+                     weight : *mut f32, bias : *mut f32, B : i64, T : i64, C : i64) -> void {
+  let eps : f32 = 0.00001;
+  unsafe {
+    for b in 0..B {
+      for t in 0..T {
+        let x = b * T * C + t * C;
+        let mut m : f32 = 0.0;
+        for i in 0..C {
+          m = m + inp[x + i];
+        }
+        m = m / (C as f32);
+        let mut v : f32 = 0.0;
+        for i in 0..C {
+          let xshift = inp[x + i] - m;
+          v = v + xshift * xshift;
+        }
+        v = v / (C as f32);
+        let s = 1.0 / sqrtf(v + eps);
+        for i in 0..C {
+          let n = s * (inp[x + i] - m);
+          out[x + i] = n * weight[i] + bias[i];
+        }
+        mean[b * T + t] = m;
+        rstd[b * T + t] = s;
+      }
+    }
+  }
+}
+
+fn layernorm_backward(dinp : *mut f32, dweight : *mut f32, dbias : *mut f32, dout : *mut f32,
+                      inp : *mut f32, weight : *mut f32, mean : *mut f32, rstd : *mut f32,
+                      B : i64, T : i64, C : i64) -> void {
+  unsafe {
+    for b in 0..B {
+      for t in 0..T {
+        let bt = b * T * C + t * C;
+        let mean_bt = mean[b * T + t];
+        let rstd_bt = rstd[b * T + t];
+        let mut dnorm_mean : f32 = 0.0;
+        let mut dnorm_norm_mean : f32 = 0.0;
+        for i in 0..C {
+          let norm_bti = (inp[bt + i] - mean_bt) * rstd_bt;
+          let dnorm_i = weight[i] * dout[bt + i];
+          dnorm_mean = dnorm_mean + dnorm_i;
+          dnorm_norm_mean = dnorm_norm_mean + dnorm_i * norm_bti;
+        }
+        dnorm_mean = dnorm_mean / (C as f32);
+        dnorm_norm_mean = dnorm_norm_mean / (C as f32);
+        for i in 0..C {
+          let norm_bti = (inp[bt + i] - mean_bt) * rstd_bt;
+          let dnorm_i = weight[i] * dout[bt + i];
+          dbias[i] = dbias[i] + dout[bt + i];
+          dweight[i] = dweight[i] + norm_bti * dout[bt + i];
+          let mut dval : f32 = 0.0;
+          dval = dval + dnorm_i;
+          dval = dval - dnorm_mean;
+          dval = dval - norm_bti * dnorm_norm_mean;
+          dval = dval * rstd_bt;
+          dinp[bt + i] = dinp[bt + i] + dval;
+        }
+      }
+    }
+  }
+}
+
+// The reference loop, used when B * T is not a multiple of 8.
+fn matmul_forward_naive(out : *mut f32, inp : *mut f32, weight : *mut f32, bias : *mut f32,
+                        has_bias : bool, B : i64, T : i64, C : i64, OC : i64) -> void {
+  unsafe {
+    for bt in 0..(B * T) {
+      for o in 0..OC {
+        let mut val : f32 = 0.0;
+        if has_bias { val = bias[o]; }
+        for i in 0..C {
+          val = val + inp[bt * C + i] * weight[o * C + i];
+        }
+        out[bt * OC + o] = val;
+      }
+    }
+  }
+}
+
+// out is (B,T,OC), inp is (B,T,C), weight is (OC,C), bias is (OC). Eight rows
+// share each weight load, as in llm.c. Vx has no local arrays, so the eight
+// accumulators are named.
+fn matmul_forward(out : *mut f32, inp : *mut f32, weight : *mut f32, bias : *mut f32,
+                  has_bias : bool, B : i64, T : i64, C : i64, OC : i64) -> void {
+  let BT = B * T;
+  if BT % 8 != 0 {
+    matmul_forward_naive(out, inp, weight, bias, has_bias, B, T, C, OC);
+    return;
+  }
+  unsafe {
+    let mut obt : i64 = 0;
+    while obt < BT {
+      for o in 0..OC {
+        let mut init : f32 = 0.0;
+        if has_bias { init = bias[o]; }
+        let mut r0 = init; let mut r1 = init; let mut r2 = init; let mut r3 = init;
+        let mut r4 = init; let mut r5 = init; let mut r6 = init; let mut r7 = init;
+        for i in 0..C {
+          let w = weight[i + o * C];
+          r0 = r0 + inp[(obt + 0) * C + i] * w;
+          r1 = r1 + inp[(obt + 1) * C + i] * w;
+          r2 = r2 + inp[(obt + 2) * C + i] * w;
+          r3 = r3 + inp[(obt + 3) * C + i] * w;
+          r4 = r4 + inp[(obt + 4) * C + i] * w;
+          r5 = r5 + inp[(obt + 5) * C + i] * w;
+          r6 = r6 + inp[(obt + 6) * C + i] * w;
+          r7 = r7 + inp[(obt + 7) * C + i] * w;
+        }
+        out[(obt + 0) * OC + o] = r0;
+        out[(obt + 1) * OC + o] = r1;
+        out[(obt + 2) * OC + o] = r2;
+        out[(obt + 3) * OC + o] = r3;
+        out[(obt + 4) * OC + o] = r4;
+        out[(obt + 5) * OC + o] = r5;
+        out[(obt + 6) * OC + o] = r6;
+        out[(obt + 7) * OC + o] = r7;
+      }
+      obt = obt + 8;
+    }
+  }
+}
+
+fn matmul_backward(dinp : *mut f32, dweight : *mut f32, dbias : *mut f32, has_bias : bool,
+                   dout : *mut f32, inp : *mut f32, weight : *mut f32,
+                   B : i64, T : i64, C : i64, OC : i64) -> void {
+  unsafe {
+    // Backward into inp.
+    for bt in 0..(B * T) {
+      let dout_bt = bt * OC;
+      let dinp_bt = bt * C;
+      for o in 0..OC {
+        let wrow = o * C;
+        let d = dout[dout_bt + o];
+        for i in 0..C {
+          dinp[dinp_bt + i] = dinp[dinp_bt + i] + weight[wrow + i] * d;
+        }
+      }
+    }
+    // Backward into weight and bias.
+    for o in 0..OC {
+      let dwrow = o * C;
+      for bt in 0..(B * T) {
+        let d = dout[bt * OC + o];
+        if has_bias { dbias[o] = dbias[o] + d; }
+        let inp_bt = bt * C;
+        for i in 0..C {
+          dweight[dwrow + i] = dweight[dwrow + i] + inp[inp_bt + i] * d;
+        }
+      }
+    }
+  }
+}
+
+// inp is (B,T,3C) holding Q, K and V. preatt and att are (B,NH,T,T). out is (B,T,C).
+fn attention_forward(out : *mut f32, preatt : *mut f32, att : *mut f32, inp : *mut f32,
+                     B : i64, T : i64, C : i64, NH : i64) -> void {
+  let C3 = C * 3;
+  let hs = C / NH;
+  // llm.c divides in double here: `1.0 / sqrtf(hs)`.
+  let sqrt_hs = unsafe { sqrtf(hs as f32) };
+  let scale = (1.0f64 / (sqrt_hs as f64)) as f32;
+  unsafe {
+    for b in 0..B {
+      for t in 0..T {
+        for h in 0..NH {
+          let query_t = b * T * C3 + t * C3 + h * hs;
+          let att_bth = b * NH * T * T + h * T * T + t * T;
+
+          // Pass 1: query dot key, and the maximum.
+          let mut maxval : f32 = -10000.0;
+          for t2 in 0..(t + 1) {
+            let key_t2 = b * T * C3 + t2 * C3 + h * hs + C;
+            let mut val : f32 = 0.0;
+            for i in 0..hs {
+              val = val + inp[query_t + i] * inp[key_t2 + i];
+            }
+            val = val * scale;
+            if val > maxval { maxval = val; }
+            preatt[att_bth + t2] = val;
+          }
+
+          // Pass 2: exponentials and their sum.
+          let mut expsum : f32 = 0.0;
+          for t2 in 0..(t + 1) {
+            let expv = expf(preatt[att_bth + t2] - maxval);
+            expsum = expsum + expv;
+            att[att_bth + t2] = expv;
+          }
+          let mut expsum_inv : f32 = 0.0;
+          if expsum != 0.0 { expsum_inv = 1.0 / expsum; }
+
+          // Pass 3: normalize, and zero the causal mask.
+          for t2 in 0..T {
+            if t2 <= t {
+              att[att_bth + t2] = att[att_bth + t2] * expsum_inv;
+            } else {
+              att[att_bth + t2] = 0.0;
+            }
+          }
+
+          // Pass 4: weighted sum of the values.
+          let out_bth = b * T * C + t * C + h * hs;
+          for i in 0..hs { out[out_bth + i] = 0.0; }
+          for t2 in 0..(t + 1) {
+            let value_t2 = b * T * C3 + t2 * C3 + h * hs + C * 2;
+            let att_btht2 = att[att_bth + t2];
+            for i in 0..hs {
+              out[out_bth + i] = out[out_bth + i] + att_btht2 * inp[value_t2 + i];
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn attention_backward(dinp : *mut f32, dpreatt : *mut f32, datt : *mut f32, dout : *mut f32,
+                      inp : *mut f32, att : *mut f32, B : i64, T : i64, C : i64, NH : i64) -> void {
+  let C3 = C * 3;
+  let hs = C / NH;
+  let sqrt_hs = unsafe { sqrtf(hs as f32) };
+  let scale : f32 = 1.0 / sqrt_hs;
+  unsafe {
+    for b in 0..B {
+      for t in 0..T {
+        for h in 0..NH {
+          let att_bth = b * NH * T * T + h * T * T + t * T;
+          let query_t = b * T * C3 + t * C3 + h * hs;
+
+          // Backward pass 4, through the value accumulation.
+          let dout_bth = b * T * C + t * C + h * hs;
+          for t2 in 0..(t + 1) {
+            let value_t2 = b * T * C3 + t2 * C3 + h * hs + C * 2;
+            for i in 0..hs {
+              datt[att_bth + t2] = datt[att_bth + t2] + inp[value_t2 + i] * dout[dout_bth + i];
+              dinp[value_t2 + i] = dinp[value_t2 + i] + att[att_bth + t2] * dout[dout_bth + i];
+            }
+          }
+
+          // Backward passes 2 and 3, the softmax.
+          for t2 in 0..(t + 1) {
+            for t3 in 0..(t + 1) {
+              let mut indicator : f32 = 0.0;
+              if t2 == t3 { indicator = 1.0; }
+              let local_derivative = att[att_bth + t2] * (indicator - att[att_bth + t3]);
+              dpreatt[att_bth + t3] = dpreatt[att_bth + t3] + local_derivative * datt[att_bth + t2];
+            }
+          }
+
+          // Backward pass 1, the query @ key matmul.
+          for t2 in 0..(t + 1) {
+            let key_t2 = b * T * C3 + t2 * C3 + h * hs + C;
+            for i in 0..hs {
+              dinp[query_t + i] = dinp[query_t + i] + inp[key_t2 + i] * dpreatt[att_bth + t2] * scale;
+              dinp[key_t2 + i] = dinp[key_t2 + i] + inp[query_t + i] * dpreatt[att_bth + t2] * scale;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// sqrt(2 / pi), rounded the way llm.c's `sqrtf(2.0f / M_PI)` rounds it.
+fn gelu_scaling_factor() -> f32 {
+  return unsafe { sqrtf((2.0f64 / 3.141592653589793f64) as f32) };
+}
+
+fn gelu_forward(out : *mut f32, inp : *mut f32, N : i64) -> void {
+  let s = gelu_scaling_factor();
+  unsafe {
+    for i in 0..N {
+      let x = inp[i];
+      let cube = 0.044715 * x * x * x;
+      out[i] = 0.5 * x * (1.0 + tanhf(s * (x + cube)));
+    }
+  }
+}
+
+fn gelu_backward(dinp : *mut f32, inp : *mut f32, dout : *mut f32, N : i64) -> void {
+  let s = gelu_scaling_factor();
+  unsafe {
+    for i in 0..N {
+      let x = inp[i];
+      let cube = 0.044715 * x * x * x;
+      let tanh_arg = s * (x + cube);
+      let tanh_out = tanhf(tanh_arg);
+      let coshf_out = coshf(tanh_arg);
+      let sech_out = 1.0 / (coshf_out * coshf_out);
+      let local_grad = 0.5 * (1.0 + tanh_out) + x * 0.5 * sech_out * s * (1.0 + 3.0 * 0.044715 * x * x);
+      dinp[i] = dinp[i] + local_grad * dout[i];
+    }
+  }
+}
+
+fn residual_forward(out : *mut f32, inp1 : *mut f32, inp2 : *mut f32, N : i64) -> void {
+  unsafe {
+    for i in 0..N { out[i] = inp1[i] + inp2[i]; }
+  }
+}
+
+fn residual_backward(dinp1 : *mut f32, dinp2 : *mut f32, dout : *mut f32, N : i64) -> void {
+  unsafe {
+    for i in 0..N {
+      dinp1[i] = dinp1[i] + dout[i];
+      dinp2[i] = dinp2[i] + dout[i];
+    }
+  }
+}
+
+// probs and logits are (B,T,Vp). Only the first V entries are real tokens.
+fn softmax_forward(probs : *mut f32, logits : *mut f32, B : i64, T : i64, V : i64, Vp : i64) -> void {
+  unsafe {
+    for bt in 0..(B * T) {
+      let row = bt * Vp;
+      let mut maxval : f32 = -10000.0;
+      for i in 0..V {
+        if logits[row + i] > maxval { maxval = logits[row + i]; }
+      }
+      let mut sum : f32 = 0.0;
+      for i in 0..V {
+        probs[row + i] = expf(logits[row + i] - maxval);
+        sum = sum + probs[row + i];
+      }
+      for i in 0..V { probs[row + i] = probs[row + i] / sum; }
+      for i in V..Vp { probs[row + i] = 0.0; }
+    }
+  }
+}
+
+fn crossentropy_forward(losses : *mut f32, probs : *mut f32, targets : *mut i32,
+                        B : i64, T : i64, Vp : i64) -> void {
+  unsafe {
+    for bt in 0..(B * T) {
+      let ix = targets[bt] as i64;
+      losses[bt] = 0.0 - logf(probs[bt * Vp + ix]);
+    }
+  }
+}
+
+fn crossentropy_softmax_backward(dlogits : *mut f32, dlosses : *mut f32, probs : *mut f32,
+                                 targets : *mut i32, B : i64, T : i64, V : i64, Vp : i64) -> void {
+  unsafe {
+    for bt in 0..(B * T) {
+      let row = bt * Vp;
+      let dloss = dlosses[bt];
+      let ix = targets[bt] as i64;
+      for i in 0..V {
+        let p = probs[row + i];
+        let mut indicator : f32 = 0.0;
+        if i == ix { indicator = 1.0; }
+        dlogits[row + i] = dlogits[row + i] + (p - indicator) * dloss;
+      }
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// The model.
+
+struct GPT2Config {
+  max_seq_len : i64,
+  vocab_size : i64,
+  padded_vocab_size : i64,
+  num_layers : i64,
+  num_heads : i64,
+  channels : i64,
+}
+
+// Pointers into one flat buffer of all parameters, in llm.c's order.
+struct ParameterTensors {
+  wte : *mut f32,      // (Vp, C)
+  wpe : *mut f32,      // (maxT, C)
+  ln1w : *mut f32,     // (L, C)
+  ln1b : *mut f32,     // (L, C)
+  qkvw : *mut f32,     // (L, 3C, C)
+  qkvb : *mut f32,     // (L, 3C)
+  attprojw : *mut f32, // (L, C, C)
+  attprojb : *mut f32, // (L, C)
+  ln2w : *mut f32,     // (L, C)
+  ln2b : *mut f32,     // (L, C)
+  fcw : *mut f32,      // (L, 4C, C)
+  fcb : *mut f32,      // (L, 4C)
+  fcprojw : *mut f32,  // (L, C, 4C)
+  fcprojb : *mut f32,  // (L, C)
+  lnfw : *mut f32,     // (C)
+  lnfb : *mut f32,     // (C)
+}
+
+// Pointers into one flat buffer of all activations, in llm.c's order.
+struct ActivationTensors {
+  encoded : *mut f32,   // (B, T, C)
+  ln1 : *mut f32,       // (L, B, T, C)
+  ln1_mean : *mut f32,  // (L, B, T)
+  ln1_rstd : *mut f32,  // (L, B, T)
+  qkv : *mut f32,       // (L, B, T, 3C)
+  atty : *mut f32,      // (L, B, T, C)
+  preatt : *mut f32,    // (L, B, NH, T, T)
+  att : *mut f32,       // (L, B, NH, T, T)
+  attproj : *mut f32,   // (L, B, T, C)
+  residual2 : *mut f32, // (L, B, T, C)
+  ln2 : *mut f32,       // (L, B, T, C)
+  ln2_mean : *mut f32,  // (L, B, T)
+  ln2_rstd : *mut f32,  // (L, B, T)
+  fch : *mut f32,       // (L, B, T, 4C)
+  fch_gelu : *mut f32,  // (L, B, T, 4C)
+  fcproj : *mut f32,    // (L, B, T, C)
+  residual3 : *mut f32, // (L, B, T, C)
+  lnf : *mut f32,       // (B, T, C)
+  lnf_mean : *mut f32,  // (B, T)
+  lnf_rstd : *mut f32,  // (B, T)
+  logits : *mut f32,    // (B, T, Vp)
+  probs : *mut f32,     // (B, T, Vp)
+  losses : *mut f32,    // (B, T)
+}
+
+fn num_parameters(c : &GPT2Config) -> i64 {
+  let C = c.channels;
+  return c.padded_vocab_size * C + c.max_seq_len * C + c.num_layers * (12 * C * C + 13 * C) + 2 * C;
+}
+
+fn num_activations(c : &GPT2Config, B : i64, T : i64) -> i64 {
+  let C = c.channels;
+  let L = c.num_layers;
+  return B * (2 * T * C + 3 * T + 2 * T * c.padded_vocab_size
+              + L * (18 * T * C + 4 * T + 2 * c.num_heads * T * T));
+}
+
+fn point_parameters(base : *mut f32, c : &GPT2Config) -> ParameterTensors {
+  let C = c.channels;
+  let L = c.num_layers;
+  let wpe = at(base, c.padded_vocab_size * C);
+  let ln1w = at(wpe, c.max_seq_len * C);
+  let ln1b = at(ln1w, L * C);
+  let qkvw = at(ln1b, L * C);
+  let qkvb = at(qkvw, L * 3 * C * C);
+  let attprojw = at(qkvb, L * 3 * C);
+  let attprojb = at(attprojw, L * C * C);
+  let ln2w = at(attprojb, L * C);
+  let ln2b = at(ln2w, L * C);
+  let fcw = at(ln2b, L * C);
+  let fcb = at(fcw, L * 4 * C * C);
+  let fcprojw = at(fcb, L * 4 * C);
+  let fcprojb = at(fcprojw, L * C * 4 * C);
+  let lnfw = at(fcprojb, L * C);
+  let lnfb = at(lnfw, C);
+  return ParameterTensors {
+    wte: base, wpe: wpe, ln1w: ln1w, ln1b: ln1b, qkvw: qkvw, qkvb: qkvb,
+    attprojw: attprojw, attprojb: attprojb, ln2w: ln2w, ln2b: ln2b, fcw: fcw, fcb: fcb,
+    fcprojw: fcprojw, fcprojb: fcprojb, lnfw: lnfw, lnfb: lnfb
+  };
+}
+
+fn point_activations(base : *mut f32, c : &GPT2Config, B : i64, T : i64) -> ActivationTensors {
+  let C = c.channels;
+  let L = c.num_layers;
+  let BT = B * T;
+  let ln1 = at(base, BT * C);
+  let ln1_mean = at(ln1, L * BT * C);
+  let ln1_rstd = at(ln1_mean, L * BT);
+  let qkv = at(ln1_rstd, L * BT);
+  let atty = at(qkv, L * BT * 3 * C);
+  let preatt = at(atty, L * BT * C);
+  let att = at(preatt, L * B * c.num_heads * T * T);
+  let attproj = at(att, L * B * c.num_heads * T * T);
+  let residual2 = at(attproj, L * BT * C);
+  let ln2 = at(residual2, L * BT * C);
+  let ln2_mean = at(ln2, L * BT * C);
+  let ln2_rstd = at(ln2_mean, L * BT);
+  let fch = at(ln2_rstd, L * BT);
+  let fch_gelu = at(fch, L * BT * 4 * C);
+  let fcproj = at(fch_gelu, L * BT * 4 * C);
+  let residual3 = at(fcproj, L * BT * C);
+  let lnf = at(residual3, L * BT * C);
+  let lnf_mean = at(lnf, BT * C);
+  let lnf_rstd = at(lnf_mean, BT);
+  let logits = at(lnf_rstd, BT);
+  let probs = at(logits, BT * c.padded_vocab_size);
+  let losses = at(probs, BT * c.padded_vocab_size);
+  return ActivationTensors {
+    encoded: base, ln1: ln1, ln1_mean: ln1_mean, ln1_rstd: ln1_rstd, qkv: qkv, atty: atty,
+    preatt: preatt, att: att, attproj: attproj, residual2: residual2, ln2: ln2,
+    ln2_mean: ln2_mean, ln2_rstd: ln2_rstd, fch: fch, fch_gelu: fch_gelu, fcproj: fcproj,
+    residual3: residual3, lnf: lnf, lnf_mean: lnf_mean, lnf_rstd: lnf_rstd, logits: logits,
+    probs: probs, losses: losses
+  };
+}
+
+// The model state. Every buffer is owned by the caller, which allocates them
+// all in one function so Vx's capacity check sees them together.
+struct GPT2 {
+  config : GPT2Config,
+  params : ParameterTensors,
+  grads : ParameterTensors,
+  params_memory : *mut f32,
+  grads_memory : *mut f32,
+  m_memory : *mut f32,
+  v_memory : *mut f32,
+  num_parameters : i64,
+  acts : ActivationTensors,
+  grads_acts : ActivationTensors,
+  grads_acts_memory : *mut f32,
+  num_activations : i64,
+  batch_size : i64,
+  seq_len : i64,
+  inputs : *mut i32,
+  targets : *mut i32,
+  mean_loss : f32,
+}
+
+fn zero(p : *mut f32, n : i64) -> void {
+  unsafe {
+    for i in 0..n { p[i] = 0.0; }
+  }
+}
+
+// Forward pass over (B,T) tokens already in `model.inputs` and `model.targets`.
+fn gpt2_forward(model : &mut GPT2, has_targets : bool) -> void {
+  let B = model.batch_size;
+  let T = model.seq_len;
+  let V = model.config.vocab_size;
+  let Vp = model.config.padded_vocab_size;
+  let L = model.config.num_layers;
+  let NH = model.config.num_heads;
+  let C = model.config.channels;
+  let BT = B * T;
+  let params = model.params;
+  let acts = model.acts;
+
+  encoder_forward(acts.encoded, model.inputs, params.wte, params.wpe, B, T, C);
+  for l in 0..L {
+    let mut residual = acts.encoded;
+    if l > 0 { residual = at(acts.residual3, (l - 1) * BT * C); }
+
+    let l_ln1w = at(params.ln1w, l * C);
+    let l_ln1b = at(params.ln1b, l * C);
+    let l_qkvw = at(params.qkvw, l * 3 * C * C);
+    let l_qkvb = at(params.qkvb, l * 3 * C);
+    let l_attprojw = at(params.attprojw, l * C * C);
+    let l_attprojb = at(params.attprojb, l * C);
+    let l_ln2w = at(params.ln2w, l * C);
+    let l_ln2b = at(params.ln2b, l * C);
+    let l_fcw = at(params.fcw, l * 4 * C * C);
+    let l_fcb = at(params.fcb, l * 4 * C);
+    let l_fcprojw = at(params.fcprojw, l * C * 4 * C);
+    let l_fcprojb = at(params.fcprojb, l * C);
+
+    let l_ln1 = at(acts.ln1, l * BT * C);
+    let l_ln1_mean = at(acts.ln1_mean, l * BT);
+    let l_ln1_rstd = at(acts.ln1_rstd, l * BT);
+    let l_qkv = at(acts.qkv, l * BT * 3 * C);
+    let l_atty = at(acts.atty, l * BT * C);
+    let l_preatt = at(acts.preatt, l * B * NH * T * T);
+    let l_att = at(acts.att, l * B * NH * T * T);
+    let l_attproj = at(acts.attproj, l * BT * C);
+    let l_residual2 = at(acts.residual2, l * BT * C);
+    let l_ln2 = at(acts.ln2, l * BT * C);
+    let l_ln2_mean = at(acts.ln2_mean, l * BT);
+    let l_ln2_rstd = at(acts.ln2_rstd, l * BT);
+    let l_fch = at(acts.fch, l * BT * 4 * C);
+    let l_fch_gelu = at(acts.fch_gelu, l * BT * 4 * C);
+    let l_fcproj = at(acts.fcproj, l * BT * C);
+    let l_residual3 = at(acts.residual3, l * BT * C);
+
+    layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
+    matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, true, B, T, C, 3 * C);
+    attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
+    matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, true, B, T, C, C);
+    residual_forward(l_residual2, residual, l_attproj, BT * C);
+    layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
+    matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, true, B, T, C, 4 * C);
+    gelu_forward(l_fch_gelu, l_fch, BT * 4 * C);
+    matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, true, B, T, 4 * C, C);
+    residual_forward(l_residual3, l_residual2, l_fcproj, BT * C);
+  }
+  let residual = at(acts.residual3, (L - 1) * BT * C);
+  layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params.lnfw, params.lnfb, B, T, C);
+  matmul_forward(acts.logits, acts.lnf, params.wte, params.wte, false, B, T, C, Vp);
+  softmax_forward(acts.probs, acts.logits, B, T, V, Vp);
+
+  if has_targets {
+    crossentropy_forward(acts.losses, acts.probs, model.targets, B, T, Vp);
+    let mut mean_loss : f32 = 0.0;
+    unsafe {
+      for i in 0..BT { mean_loss = mean_loss + acts.losses[i]; }
+    }
+    model.mean_loss = mean_loss / (BT as f32);
+  } else {
+    model.mean_loss = -1.0;
+  }
+  return;
+}
+
+fn gpt2_zero_grad(model : &GPT2) -> void {
+  zero(model.grads_memory, model.num_parameters);
+  zero(model.grads_acts_memory, model.num_activations);
+}
+
+fn gpt2_backward(model : &GPT2) -> void {
+  let B = model.batch_size;
+  let T = model.seq_len;
+  let V = model.config.vocab_size;
+  let Vp = model.config.padded_vocab_size;
+  let L = model.config.num_layers;
+  let NH = model.config.num_heads;
+  let C = model.config.channels;
+  let BT = B * T;
+  let params = model.params;
+  let grads = model.grads;
+  let acts = model.acts;
+  let mut grads_acts = model.grads_acts;
+
+  // Start the chain rule with dloss = 1 / (B*T): the mean over all positions.
+  let dloss_mean : f32 = 1.0 / (BT as f32);
+  unsafe {
+    for i in 0..BT { grads_acts.losses[i] = dloss_mean; }
+  }
+
+  crossentropy_softmax_backward(grads_acts.logits, grads_acts.losses, acts.probs, model.targets, B, T, V, Vp);
+  matmul_backward(grads_acts.lnf, grads.wte, grads.wte, false, grads_acts.logits, acts.lnf, params.wte, B, T, C, Vp);
+  let residual = at(acts.residual3, (L - 1) * BT * C);
+  let dresidual = at(grads_acts.residual3, (L - 1) * BT * C);
+  layernorm_backward(dresidual, grads.lnfw, grads.lnfb, grads_acts.lnf, residual, params.lnfw,
+                     acts.lnf_mean, acts.lnf_rstd, B, T, C);
+
+  let mut l = L - 1;
+  while l >= 0 {
+    let mut residual = acts.encoded;
+    let mut dresidual = grads_acts.encoded;
+    if l > 0 {
+      residual = at(acts.residual3, (l - 1) * BT * C);
+      dresidual = at(grads_acts.residual3, (l - 1) * BT * C);
+    }
+
+    let l_ln1w = at(params.ln1w, l * C);
+    let l_qkvw = at(params.qkvw, l * 3 * C * C);
+    let l_attprojw = at(params.attprojw, l * C * C);
+    let l_ln2w = at(params.ln2w, l * C);
+    let l_fcw = at(params.fcw, l * 4 * C * C);
+    let l_fcprojw = at(params.fcprojw, l * C * 4 * C);
+
+    let dl_ln1w = at(grads.ln1w, l * C);
+    let dl_ln1b = at(grads.ln1b, l * C);
+    let dl_qkvw = at(grads.qkvw, l * 3 * C * C);
+    let dl_qkvb = at(grads.qkvb, l * 3 * C);
+    let dl_attprojw = at(grads.attprojw, l * C * C);
+    let dl_attprojb = at(grads.attprojb, l * C);
+    let dl_ln2w = at(grads.ln2w, l * C);
+    let dl_ln2b = at(grads.ln2b, l * C);
+    let dl_fcw = at(grads.fcw, l * 4 * C * C);
+    let dl_fcb = at(grads.fcb, l * 4 * C);
+    let dl_fcprojw = at(grads.fcprojw, l * C * 4 * C);
+    let dl_fcprojb = at(grads.fcprojb, l * C);
+
+    let l_ln1 = at(acts.ln1, l * BT * C);
+    let l_ln1_mean = at(acts.ln1_mean, l * BT);
+    let l_ln1_rstd = at(acts.ln1_rstd, l * BT);
+    let l_qkv = at(acts.qkv, l * BT * 3 * C);
+    let l_atty = at(acts.atty, l * BT * C);
+    let l_att = at(acts.att, l * B * NH * T * T);
+    let l_residual2 = at(acts.residual2, l * BT * C);
+    let l_ln2 = at(acts.ln2, l * BT * C);
+    let l_ln2_mean = at(acts.ln2_mean, l * BT);
+    let l_ln2_rstd = at(acts.ln2_rstd, l * BT);
+    let l_fch = at(acts.fch, l * BT * 4 * C);
+    let l_fch_gelu = at(acts.fch_gelu, l * BT * 4 * C);
+
+    let dl_ln1 = at(grads_acts.ln1, l * BT * C);
+    let dl_qkv = at(grads_acts.qkv, l * BT * 3 * C);
+    let dl_atty = at(grads_acts.atty, l * BT * C);
+    let dl_preatt = at(grads_acts.preatt, l * B * NH * T * T);
+    let dl_att = at(grads_acts.att, l * B * NH * T * T);
+    let dl_attproj = at(grads_acts.attproj, l * BT * C);
+    let dl_residual2 = at(grads_acts.residual2, l * BT * C);
+    let dl_ln2 = at(grads_acts.ln2, l * BT * C);
+    let dl_fch = at(grads_acts.fch, l * BT * 4 * C);
+    let dl_fch_gelu = at(grads_acts.fch_gelu, l * BT * 4 * C);
+    let dl_fcproj = at(grads_acts.fcproj, l * BT * C);
+    let dl_residual3 = at(grads_acts.residual3, l * BT * C);
+
+    residual_backward(dl_residual2, dl_fcproj, dl_residual3, BT * C);
+    matmul_backward(dl_fch_gelu, dl_fcprojw, dl_fcprojb, true, dl_fcproj, l_fch_gelu, l_fcprojw, B, T, 4 * C, C);
+    gelu_backward(dl_fch, l_fch, dl_fch_gelu, BT * 4 * C);
+    matmul_backward(dl_ln2, dl_fcw, dl_fcb, true, dl_fch, l_ln2, l_fcw, B, T, C, 4 * C);
+    layernorm_backward(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B, T, C);
+    residual_backward(dresidual, dl_attproj, dl_residual2, BT * C);
+    matmul_backward(dl_atty, dl_attprojw, dl_attprojb, true, dl_attproj, l_atty, l_attprojw, B, T, C, C);
+    attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, B, T, C, NH);
+    matmul_backward(dl_ln1, dl_qkvw, dl_qkvb, true, dl_qkv, l_ln1, l_qkvw, B, T, C, 3 * C);
+    layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C);
+    l = l - 1;
+  }
+  encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, model.inputs, B, T, C);
+}
+
+// AdamW, as in PyTorch's torch.optim.AdamW. `t` counts steps from 1.
+fn gpt2_update(model : &GPT2, learning_rate : f32, beta1 : f32, beta2 : f32, eps : f32,
+               weight_decay : f32, t : i32) -> void {
+  let params = model.params_memory;
+  let grads = model.grads_memory;
+  let ms = model.m_memory;
+  let vs = model.v_memory;
+  let beta1_t = unsafe { powf(beta1, t as f32) };
+  let beta2_t = unsafe { powf(beta2, t as f32) };
+  let beta1_correction = 1.0 - beta1_t;
+  let beta2_correction = 1.0 - beta2_t;
+  unsafe {
+    for i in 0..model.num_parameters {
+      let param = params[i];
+      let g = grads[i];
+      let m = beta1 * ms[i] + (1.0 - beta1) * g;
+      let v = beta2 * vs[i] + (1.0 - beta2) * g * g;
+      let m_hat = m / beta1_correction;
+      let v_hat = v / beta2_correction;
+      ms[i] = m;
+      vs[i] = v;
+      params[i] = params[i] - learning_rate * (m_hat / (sqrtf(v_hat) + eps) + weight_decay * param);
+    }
+  }
+}

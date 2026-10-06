@@ -1,0 +1,268 @@
+// Checks gpt2.vx against a reference, as llm.c's test_gpt2.c does: logits,
+// loss and every parameter gradient after one forward and backward pass, then
+// the loss after each of ten AdamW steps.
+//
+// Two references run when present:
+//   build/ref_*.bin       a small random GPT-2 written by ref/make_ref.c with
+//                         llm.c's C code. Vx must match it exactly.
+//   llm.c/gpt2_124M*.bin  GPT-2 124M and llm.c's PyTorch state, checked with
+//                         llm.c's own tolerances.
+import gpt2;
+import std::libc;
+import std::time;
+
+extern "C" {
+  fn mmap(addr : *mut i8, len : i64, prot : i32, flags : i32, fd : i32, offset : i64) -> *mut i8;
+  fn fabsf(x : f32) -> f32;
+}
+
+// Maps `path` read-only, or answers false when it cannot be opened.
+fn map_file(path : *const i8, out : &mut MappedFile) -> bool {
+  let fd = unsafe { open(path, 0) };
+  if fd < 0 { return false; }
+  let size = unsafe { lseek(fd, 0i64, 2) };
+  out.data = unsafe { mmap(0 as *mut i8, size, 1, 2, fd, 0i64) };
+  return true;
+}
+
+struct MappedFile {
+  data : *mut i8,
+}
+
+// Prints the first values and the largest difference. Answers whether every
+// difference is within `tol`.
+fn check_tensor(a : *mut f32, b : *mut f32, n : i64, tol : f32, label : *const i8) -> bool {
+  let mut ok = true;
+  let mut maxdiff : f32 = 0.0;
+  unsafe {
+    for i in 0..n {
+      let diff = unsafe { fabsf(a[i] - b[i]) };
+      if diff > tol { ok = false; }
+      if diff > maxdiff { maxdiff = diff; }
+    }
+  }
+  print!(label);
+  if ok { print!(" OK, maxdiff = "); } else { print!(" NOT OK, maxdiff = "); }
+  print(maxdiff);
+  print!("\n");
+  return ok;
+}
+
+// One test against one reference. The model shape and the batch are compile-time
+// constants, so every buffer below has a static size the capacity check can sum.
+fn test<const MAXT : i32, const V : i32, const VP : i32, const L : i32, const NH : i32,
+        const C : i32, const B : i32, const T : i32>(model_file : *mut i8, state_file : *mut i8,
+        expected_losses : *mut f32, exact : bool) -> bool {
+  let config = GPT2Config {
+    max_seq_len: MAXT as i64, vocab_size: V as i64, padded_vocab_size: VP as i64,
+    num_layers: L as i64, num_heads: NH as i64, channels: C as i64
+  };
+  let header : *mut i32 = model_file;
+  let state : *mut i32 = state_file;
+  let ok_header = unsafe {
+    header[0] == 20240326 && header[1] == 3 && header[2] == MAXT && header[3] == V
+      && header[4] == L && header[5] == NH && header[6] == C && header[7] == VP
+      && state[0] == 20240327 && state[1] == 2 && state[2] == B && state[3] == T
+  };
+  if !ok_header {
+    print!("checkpoint or state does not match the compiled configuration\n");
+    return false;
+  }
+
+  // Everything a training step touches, allocated in one place.
+  let mut params = Tensor<f32>([VP * C + MAXT * C + L * (12 * C * C + 13 * C) + 2 * C]);
+  let mut grads = Tensor<f32>([VP * C + MAXT * C + L * (12 * C * C + 13 * C) + 2 * C]);
+  let mut m = Tensor<f32>([VP * C + MAXT * C + L * (12 * C * C + 13 * C) + 2 * C]);
+  let mut v = Tensor<f32>([VP * C + MAXT * C + L * (12 * C * C + 13 * C) + 2 * C]);
+  let mut acts = Tensor<f32>([B, 2 * T * C + 3 * T + 2 * T * VP + L * (18 * T * C + 4 * T + 2 * NH * T * T)]);
+  let mut grads_acts = Tensor<f32>([B, 2 * T * C + 3 * T + 2 * T * VP + L * (18 * T * C + 4 * T + 2 * NH * T * T)]);
+  let mut inputs = Tensor<i32>([B * T]);
+  let mut targets = Tensor<i32>([B * T]);
+
+  let num_params = num_parameters(&config);
+  let num_acts = num_activations(&config, B as i64, T as i64);
+  let params_memory = params.as_mut_ptr();
+  let grads_memory = grads.as_mut_ptr();
+  let m_memory = m.as_mut_ptr();
+  let v_memory = v.as_mut_ptr();
+  let acts_memory = acts.as_mut_ptr();
+  let grads_acts_memory = grads_acts.as_mut_ptr();
+  let inputs_memory = inputs.as_mut_ptr();
+  let targets_memory = targets.as_mut_ptr();
+
+  let weights : *mut f32 = model_file;
+  let tokens : *mut i32 = state_file;
+  let expected : *mut f32 = state_file;
+  // One binding per derived pointer: Vx tracks a pointer taken from a local as a
+  // borrow of it.
+  let logits_base : *mut f32 = state_file;
+  let grads_base : *mut f32 = state_file;
+  let BT = (B * T) as i64;
+  unsafe {
+    for i in 0..num_params { params_memory[i] = weights[256 + i]; }
+    for i in 0..BT {
+      inputs_memory[i] = tokens[256 + i];
+      targets_memory[i] = tokens[256 + BT + i];
+    }
+  }
+  zero(m_memory, num_params);
+  zero(v_memory, num_params);
+  let expected_logits = at(logits_base, 256 + 2 * BT);
+  let expected_loss = unsafe { expected[256 + 2 * BT + BT * (V as i64)] };
+  let expected_grads = at(grads_base, 256 + 2 * BT + BT * (V as i64) + 1);
+
+  let param_ptrs = point_parameters(params_memory, &config);
+  let grad_ptrs = point_parameters(grads_memory, &config);
+  let act_ptrs = point_activations(acts_memory, &config, B as i64, T as i64);
+  let grad_act_ptrs = point_activations(grads_acts_memory, &config, B as i64, T as i64);
+  let mut model = GPT2 {
+    config: config,
+    params: param_ptrs,
+    grads: grad_ptrs,
+    params_memory: params_memory,
+    grads_memory: grads_memory,
+    m_memory: m_memory,
+    v_memory: v_memory,
+    num_parameters: num_params,
+    acts: act_ptrs,
+    grads_acts: grad_act_ptrs,
+    grads_acts_memory: grads_acts_memory,
+    num_activations: num_acts,
+    batch_size: B as i64,
+    seq_len: T as i64,
+    inputs: inputs_memory,
+    targets: targets_memory,
+    mean_loss: -1.0,
+  };
+  print!("num_parameters: "); print(num_params); print!("\n");
+  print!("num_activations: "); print(num_acts); print!("\n");
+
+  // Exact references must match to the bit; PyTorch to llm.c's tolerances.
+  let mut logit_tol : f32 = 0.01;
+  let mut grad_tol : f32 = 0.02;
+  if exact {
+    logit_tol = 0.0;
+    grad_tol = 0.0;
+  }
+
+  let mut allok = true;
+  let mut step : i32 = 0;
+  while step < 10 {
+    let start = unix_timestamp();
+    gpt2_forward(&mut model, true);
+    gpt2_zero_grad(&model);
+    gpt2_backward(&model);
+    let elapsed_ms = (unix_timestamp() - start) * 1000.0;
+
+    if step == 0 {
+      // Logits: the reference stores V per position; ours are padded to Vp.
+      let mut logits_ok = true;
+      let mut max_diff : f32 = 0.0;
+      unsafe {
+        for bt in 0..BT {
+          for vi in 0..(V as i64) {
+            let diff = fabsf(expected_logits[bt * (V as i64) + vi] - model.acts.logits[bt * (VP as i64) + vi]);
+            if diff > max_diff { max_diff = diff; }
+            if diff > logit_tol { logits_ok = false; }
+          }
+        }
+      }
+      if logits_ok { print!("OK (LOGITS), max_diff = "); } else { print!("NOT OK (LOGITS), max_diff = "); }
+      print(max_diff); print!("\n");
+      allok = allok && logits_ok;
+
+      let loss_diff = unsafe { fabsf(model.mean_loss - expected_loss) };
+      if loss_diff > logit_tol {
+        print!("LOSS MISMATCH: ");
+        allok = false;
+      } else {
+        print!("LOSS OK: ");
+      }
+      print(model.mean_loss); print!(" "); print(expected_loss); print!("\n");
+
+      let g = model.grads;
+      let e = point_parameters(expected_grads, &model.config);
+      let Vl = V as i64;
+      let Cl = C as i64;
+      let Ll = L as i64;
+      allok = check_tensor(g.wte, e.wte, Vl * Cl, grad_tol, "dwte") && allok;
+      allok = check_tensor(g.wpe, e.wpe, (MAXT as i64) * Cl, grad_tol, "dwpe") && allok;
+      allok = check_tensor(g.ln1w, e.ln1w, Ll * Cl, grad_tol, "dln1w") && allok;
+      allok = check_tensor(g.ln1b, e.ln1b, Ll * Cl, grad_tol, "dln1b") && allok;
+      allok = check_tensor(g.qkvw, e.qkvw, Ll * 3 * Cl * Cl, grad_tol, "dqkvw") && allok;
+      allok = check_tensor(g.qkvb, e.qkvb, Ll * 3 * Cl, grad_tol, "dqkvb") && allok;
+      allok = check_tensor(g.attprojw, e.attprojw, Ll * Cl * Cl, grad_tol, "dattprojw") && allok;
+      allok = check_tensor(g.attprojb, e.attprojb, Ll * Cl, grad_tol, "dattprojb") && allok;
+      allok = check_tensor(g.ln2w, e.ln2w, Ll * Cl, grad_tol, "dln2w") && allok;
+      allok = check_tensor(g.ln2b, e.ln2b, Ll * Cl, grad_tol, "dln2b") && allok;
+      allok = check_tensor(g.fcw, e.fcw, Ll * 4 * Cl * Cl, grad_tol, "dfcw") && allok;
+      allok = check_tensor(g.fcb, e.fcb, Ll * 4 * Cl, grad_tol, "dfcb") && allok;
+      allok = check_tensor(g.fcprojw, e.fcprojw, Ll * Cl * 4 * Cl, grad_tol, "dfcprojw") && allok;
+      allok = check_tensor(g.fcprojb, e.fcprojb, Ll * Cl, grad_tol, "dfcprojb") && allok;
+      allok = check_tensor(g.lnfw, e.lnfw, Cl, grad_tol, "dlnfw") && allok;
+      allok = check_tensor(g.lnfb, e.lnfb, Cl, grad_tol, "dlnfb") && allok;
+    }
+
+    gpt2_update(&model, 0.0001, 0.9, 0.999, 0.00000001, 0.01, step + 1);
+
+    let expected_step_loss = unsafe { expected_losses[step] };
+    let mut step_tol : f32 = 0.01;
+    if exact { step_tol = 0.0; }
+    let step_ok = unsafe { fabsf(expected_step_loss - model.mean_loss) } <= step_tol;
+    allok = allok && step_ok;
+    print!("step "); print(step); print!(": loss "); print(model.mean_loss);
+    print!(" (took "); print(elapsed_ms); print!(" ms) OK = ");
+    if step_ok { print!("1\n"); } else { print!("0\n"); }
+    step = step + 1;
+  }
+
+  // Read every buffer after the loop, so the capacity check holds them all
+  // resident together, as the training step does.
+  let _keep = unsafe {
+    params_memory[0] + grads_memory[0] + m_memory[0] + v_memory[0] + acts_memory[0]
+      + grads_acts_memory[0] + (inputs_memory[0] as f32) + (targets_memory[0] as f32)
+  };
+  return allok;
+}
+
+fn main() -> i32 {
+  let mut allok = true;
+  let mut ran = 0;
+
+  let mut model_file = MappedFile { data: unsafe { 0 as *mut i8 } };
+  let mut state_file = MappedFile { data: unsafe { 0 as *mut i8 } };
+  let mut losses_file = MappedFile { data: unsafe { 0 as *mut i8 } };
+  if map_file("build/ref_model.bin", &mut model_file) && map_file("build/ref_state.bin", &mut state_file)
+     && map_file("build/ref_losses.bin", &mut losses_file) {
+    print!("[small GPT-2 vs llm.c C, exact]\n");
+    let losses : *mut f32 = losses_file.data;
+    allok = test<64, 500, 512, 2, 4, 64, 4, 16>(model_file.data, state_file.data, losses, true) && allok;
+    ran = ran + 1;
+  }
+
+  if map_file("llm.c/gpt2_124M.bin", &mut model_file) && map_file("llm.c/gpt2_124M_debug_state.bin", &mut state_file) {
+    print!("[GPT-2 124M vs PyTorch]\n");
+    // The losses llm.c's test_gpt2.c expects from PyTorch.
+    let mut expected = Tensor<f32>([10]);
+    let e = expected.as_mut_ptr();
+    unsafe {
+      e[0] = 5.270007133483887; e[1] = 4.059706687927246; e[2] = 3.3751230239868164;
+      e[3] = 2.8007826805114746; e[4] = 2.315382242202759; e[5] = 1.8490285873413086;
+      e[6] = 1.3946564197540283; e[7] = 0.9991465210914612; e[8] = 0.6240804195404053;
+      e[9] = 0.37651097774505615;
+    }
+    allok = test<1024, 50257, 50304, 12, 12, 768, 4, 64>(model_file.data, state_file.data, e, false) && allok;
+    ran = ran + 1;
+  }
+
+  if ran == 0 {
+    print!("no reference found: run ref/make_ref first\n");
+    return 1;
+  }
+  if allok {
+    print!("overall okay: 1\n");
+    return 0;
+  }
+  print!("overall okay: 0\n");
+  return 1;
+}

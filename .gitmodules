@@ -1,0 +1,6 @@
+[submodule "Vx"]
+	path = Vx
+	url = https://github.com/vx-lang/Vx.git
+[submodule "llm.c"]
+	path = llm.c
+	url = https://github.com/karpathy/llm.c.git
