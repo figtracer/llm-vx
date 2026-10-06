@@ -10,11 +10,15 @@
 
 ---
 
+GPT-2 training, kernel for kernel, on the CPU and on NVIDIA GPUs. In Vx a tensor's type says where
+it lives, so the compiler can also check that a whole training step fits in GPU memory.
+
 ## Highlights
 
-- ✅ Matches llm.c bit for bit on the CPU.
-- 🖥️ Matches llm.c on an L4 and an H100.
-- 🎯 The compiler knows if a training step fits in GPU memory, exactly.
+- Matches llm.c bit for bit on the CPU: every logit, gradient and loss.
+- Matches llm.c on an L4 and an H100, to every printed digit of the losses.
+- The compiler's memory check is exact: on an H100 it admits batch 17 and rejects 18, and the card
+  agrees.
 
 ## Quick start
 
@@ -22,7 +26,9 @@
 git clone --recurse-submodules https://github.com/figtracer/llm-vx.git
 cd llm-vx
 (cd Vx && ./setup.sh && source config.local && cargo build --release --locked --bin vxc -p vxc)
-make test
+make test        # CPU port vs llm.c
+make gpu-test    # GPU program vs llm.c (runs on the CPU without CUDA)
+make admit       # largest batch per GPU, from the compiler
 ```
 
 ## License
