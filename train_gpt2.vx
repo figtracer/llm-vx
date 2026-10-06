@@ -1,0 +1,8 @@
+// Trains GPT-2 124M on tiny Shakespeare, as llm.c's train_gpt2.c does.
+// The files come from llm.c's starter pack; see the README.
+import train;
+
+fn main() -> i32 {
+  return train<1024, 50257, 50304, 12, 12, 768, 4, 64>("data/gpt2_124M.bin",
+    "data/tiny_shakespeare_train.bin", "data/tiny_shakespeare_val.bin", "data/gpt2_tokenizer.bin");
+}

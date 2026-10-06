@@ -5,38 +5,24 @@
 // Two references run when present:
 //   build/ref_*.bin       a small random GPT-2 written by ref/make_ref.c with
 //                         llm.c's C code. Vx must match it exactly.
-//   llm.c/gpt2_124M*.bin  GPT-2 124M and llm.c's PyTorch state, checked with
+//   data/gpt2_124M*.bin   GPT-2 124M and llm.c's PyTorch state, checked with
 //                         llm.c's own tolerances.
 import gpt2;
-import std::libc;
 import std::time;
+import utils;
 
 extern "C" {
-  fn mmap(addr : *mut i8, len : i64, prot : i32, flags : i32, fd : i32, offset : i64) -> *mut i8;
   fn fabsf(x : f32) -> f32;
 }
 
-// Maps `path` read-only, or answers false when it cannot be opened.
-fn map_file(path : *const i8, out : &mut MappedFile) -> bool {
-  let fd = unsafe { open(path, 0) };
-  if fd < 0 { return false; }
-  let size = unsafe { lseek(fd, 0i64, 2) };
-  out.data = unsafe { mmap(0 as *mut i8, size, 1, 2, fd, 0i64) };
-  return true;
-}
-
-struct MappedFile {
-  data : *mut i8,
-}
-
-// Prints the first values and the largest difference. Answers whether every
+// Prints the label and the largest difference. Answers whether every
 // difference is within `tol`.
 fn check_tensor(a : *mut f32, b : *mut f32, n : i64, tol : f32, label : *const i8) -> bool {
   let mut ok = true;
   let mut maxdiff : f32 = 0.0;
   unsafe {
     for i in 0..n {
-      let diff = unsafe { fabsf(a[i] - b[i]) };
+      let diff = fabsf(a[i] - b[i]);
       if diff > tol { ok = false; }
       if diff > maxdiff { maxdiff = diff; }
     }
@@ -229,9 +215,9 @@ fn main() -> i32 {
   let mut allok = true;
   let mut ran = 0;
 
-  let mut model_file = MappedFile { data: unsafe { 0 as *mut i8 } };
-  let mut state_file = MappedFile { data: unsafe { 0 as *mut i8 } };
-  let mut losses_file = MappedFile { data: unsafe { 0 as *mut i8 } };
+  let mut model_file = unmapped();
+  let mut state_file = unmapped();
+  let mut losses_file = unmapped();
   if map_file("build/ref_model.bin", &mut model_file) && map_file("build/ref_state.bin", &mut state_file)
      && map_file("build/ref_losses.bin", &mut losses_file) {
     print!("[small GPT-2 vs llm.c C, exact]\n");
@@ -240,7 +226,7 @@ fn main() -> i32 {
     ran = ran + 1;
   }
 
-  if map_file("llm.c/gpt2_124M.bin", &mut model_file) && map_file("llm.c/gpt2_124M_debug_state.bin", &mut state_file) {
+  if map_file("data/gpt2_124M.bin", &mut model_file) && map_file("data/gpt2_124M_debug_state.bin", &mut state_file) {
     print!("[GPT-2 124M vs PyTorch]\n");
     // The losses llm.c's test_gpt2.c expects from PyTorch.
     let mut expected = Tensor<f32>([10]);

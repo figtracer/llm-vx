@@ -77,5 +77,40 @@ int main(int argc, char** argv) {
     f = fopenCheck(path, "wb");
     fwrite(losses, sizeof(float), 10, f);
     fcloseCheck(f);
+
+    // Token shards in llm.c's data format, for the training loop.
+    const char* shards[2] = { "train_tokens.bin", "val_tokens.bin" };
+    int ntoks[2] = { 20001, 4001 };
+    for (int s = 0; s < 2; s++) {
+        int data_header[256] = {0};
+        data_header[0] = 20240520; data_header[1] = 1; data_header[2] = ntoks[s];
+        snprintf(path, sizeof path, "%s/%s", argv[1], shards[s]);
+        f = fopenCheck(path, "wb");
+        fwrite(data_header, sizeof(int), 256, f);
+        for (int i = 0; i < ntoks[s]; i++) {
+            uint16_t token = (uint16_t)(next_u32() % V);
+            fwrite(&token, sizeof(uint16_t), 1, f);
+        }
+        fcloseCheck(f);
+    }
+
+    // A tokenizer for the V tokens. Token 1 is a control byte and token 2 a
+    // zero byte, which the decoder must skip. The last token is end of text.
+    uint32_t tok_header[256] = {0};
+    tok_header[0] = 20240328; tok_header[1] = 2; tok_header[2] = V; tok_header[3] = V - 1;
+    snprintf(path, sizeof path, "%s/tokenizer.bin", argv[1]);
+    f = fopenCheck(path, "wb");
+    fwrite(tok_header, sizeof(uint32_t), 256, f);
+    for (int i = 0; i < V; i++) {
+        char text[16];
+        if (i == 1) { text[0] = 1; text[1] = 0; }
+        else if (i == 2) { text[0] = 0; text[1] = 0; }
+        else if (i < 12) { text[0] = 'a' + i; text[1] = 0; }
+        else { snprintf(text, sizeof text, " w%d", i); }
+        unsigned char length = (i == 2) ? 1 : (unsigned char)strlen(text);
+        fwrite(&length, 1, 1, f);
+        fwrite(text, 1, length, f);
+    }
+    fcloseCheck(f);
     return 0;
 }

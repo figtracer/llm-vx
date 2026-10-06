@@ -1,0 +1,8 @@
+// The training loop on the small random GPT-2 and data from ref/make_ref.c, to
+// compare against llm.c's own train_gpt2 binary on the same files.
+import train;
+
+fn main() -> i32 {
+  return train<64, 500, 512, 2, 4, 64, 4, 64>("build/ref_model.bin",
+    "build/train_tokens.bin", "build/val_tokens.bin", "build/tokenizer.bin");
+}

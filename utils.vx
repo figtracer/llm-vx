@@ -1,0 +1,28 @@
+// File mapping, shared by the test and the training loop.
+import std::libc;
+
+extern "C" {
+  fn mmap(addr : *mut i8, len : i64, prot : i32, flags : i32, fd : i32, offset : i64) -> *mut i8;
+}
+
+// A file mapped read-only into memory. Vx can view the bytes as any element
+// type by assigning `data` to a typed pointer.
+struct MappedFile {
+  data : *mut i8,
+  size : i64,
+}
+
+// Maps `path`, or answers false when it cannot be opened.
+fn map_file(path : *const i8, out : &mut MappedFile) -> bool {
+  let fd = unsafe { open(path, 0) };
+  if fd < 0 { return false; }
+  let size = unsafe { lseek(fd, 0i64, 2) };
+  // PROT_READ, MAP_PRIVATE.
+  out.data = unsafe { mmap(0 as *mut i8, size, 1, 2, fd, 0i64) };
+  out.size = size;
+  return true;
+}
+
+fn unmapped() -> MappedFile {
+  return MappedFile { data: unsafe { 0 as *mut i8 }, size: 0 };
+}
