@@ -1,0 +1,271 @@
+// The data loader, tokenizer and sampler from llm.c's llmc/{dataloader,rand,
+// tokenizer}.h and train_gpt2.c. The data loader reads one shard and shuffles
+// it with llm.c's Mersenne Twister, so batches arrive in the same order as in
+// llm.c.
+import utils;
+import std::io;
+
+extern "C" {
+  // C's calloc. std::alloc's malloc clashes with the allocator tensors use.
+  fn calloc(count : i64, size : i64) -> *mut i8;
+}
+
+// ----------------------------------------------------------------------------
+// Mersenne Twister, numerically identical to torch (llmc/rand.h). Each u32 is
+// held in an i64, so the arithmetic cannot overflow.
+
+// The generator's state lives in the DataLoader, whose shuffle is its only user:
+// Vx's main code generator does not take nested structs.
+
+fn manual_seed(loader : &mut DataLoader, seed : i64) -> void {
+  let s = loader.rng_state;
+  unsafe {
+    s[0] = seed & 4294967295;
+    for j in 1..624 {
+      s[j] = (1812433253 * (s[j - 1] ^ (s[j - 1] >> 30)) + (j as i64)) & 4294967295;
+    }
+  }
+  loader.rng_left = 1;
+  loader.rng_next = 0;
+}
+
+fn mt_matrix_a(y : i64) -> i64 {
+  if (y & 1) == 1 { return 2567483615; }
+  return 0;
+}
+
+fn next_state(loader : &mut DataLoader) -> void {
+  let s = loader.rng_state;
+  loader.rng_left = 624;
+  loader.rng_next = 0;
+  unsafe {
+    for j in 0..227 {
+      let y = (s[j] & 2147483648) | (s[j + 1] & 2147483647);
+      s[j] = s[j + 397] ^ (y >> 1) ^ mt_matrix_a(y);
+    }
+    for j in 227..623 {
+      let y = (s[j] & 2147483648) | (s[j + 1] & 2147483647);
+      s[j] = s[j - 227] ^ (y >> 1) ^ mt_matrix_a(y);
+    }
+    let y = (s[623] & 2147483648) | (s[0] & 2147483647);
+    s[623] = s[396] ^ (y >> 1) ^ mt_matrix_a(y);
+  }
+}
+
+fn randint32(loader : &mut DataLoader) -> i64 {
+  loader.rng_left = loader.rng_left - 1;
+  if loader.rng_left <= 0 { next_state(loader); }
+  let s = loader.rng_state;
+  let mut y = unsafe { s[loader.rng_next] };
+  loader.rng_next = loader.rng_next + 1;
+  y = y ^ (y >> 11);
+  y = y ^ ((y << 7) & 2636928640);
+  y = y ^ ((y << 15) & 4022730752);
+  y = y ^ (y >> 18);
+  return y & 4294967295;
+}
+
+// Shuffles the loader's sample indices.
+fn random_permutation(loader : &mut DataLoader) -> void {
+  let data = loader.indices;
+  let mut i = loader.num_samples - 1;
+  while i > 0 {
+    let j = randint32(loader) % (i + 1);
+    unsafe {
+      let tmp = data[i];
+      data[i] = data[j];
+      data[j] = tmp;
+    }
+    i = i - 1;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Data loader for one token shard: a 1 KiB header, then u16 tokens.
+
+struct DataLoader {
+  tokens : *mut u16,
+  num_tokens : i64,
+  B : i64,
+  T : i64,
+  num_samples : i64,
+  current_sample : i64,
+  should_shuffle : bool,
+  indices : *mut i32,
+  rng_state : *mut i64, // 624 words
+  rng_left : i64,
+  rng_next : i64,
+  inputs : *mut i32,
+  targets : *mut i32,
+}
+
+// Prepares a loader that writes each batch into `inputs` and `targets`.
+// `rng_state` holds 624 words. Answers false when the shard is missing or bad.
+fn dataloader_init(loader : &mut DataLoader, path : *const i8, B : i64, T : i64, should_shuffle : bool,
+                   rng_state : *mut i64, inputs : *mut i32, targets : *mut i32) -> bool {
+  let mut file = unmapped();
+  if !map_file(path, &mut file) {
+    print!("cannot open "); print!(path); print!("\n");
+    return false;
+  }
+  let header : *mut i32 = file.data;
+  let ok = unsafe { header[0] == 20240520 && header[1] == 1 };
+  if !ok {
+    print!("bad magic or version in "); print!(path); print!("\n");
+    return false;
+  }
+  let ntok = unsafe { header[2] as i64 };
+  if file.size != 1024 + ntok * 2 {
+    print!("unexpected file size for "); print!(path); print!("\n");
+    return false;
+  }
+  loader.tokens = file.data;
+  loader.num_tokens = ntok;
+  loader.B = B;
+  loader.T = T;
+  // One token less: each sample reads B*T+1 tokens but advances by B*T.
+  loader.num_samples = (ntok * 2 - 2) / (B * T * 2);
+  loader.should_shuffle = should_shuffle;
+  loader.inputs = inputs;
+  loader.targets = targets;
+  loader.rng_state = rng_state;
+  loader.rng_left = 1;
+  loader.rng_next = 0;
+  if should_shuffle {
+    manual_seed(loader, 42);
+    loader.indices = unsafe { calloc(loader.num_samples, 4) };
+  }
+  dataloader_reset(loader);
+  return true;
+}
+
+fn dataloader_reset(loader : &mut DataLoader) -> void {
+  loader.current_sample = 0;
+  if loader.should_shuffle {
+    // llm.c also permutes the shard list here, which draws nothing for one shard.
+    let indices = loader.indices;
+    unsafe {
+      for i in 0..loader.num_samples { indices[i] = i as i32; }
+    }
+    random_permutation(loader);
+  }
+}
+
+fn dataloader_next_batch(loader : &mut DataLoader) -> void {
+  if loader.current_sample >= loader.num_samples {
+    dataloader_reset(loader);
+  }
+  let mut idx = loader.current_sample;
+  if loader.should_shuffle {
+    idx = unsafe { loader.indices[loader.current_sample] as i64 };
+  }
+  let BT = loader.B * loader.T;
+  // Tokens start after the 512 u16 words of the header.
+  let start = 512 + idx * BT;
+  let tokens = loader.tokens;
+  let inputs = loader.inputs;
+  let targets = loader.targets;
+  unsafe {
+    for i in 0..BT {
+      inputs[i] = tokens[start + i] as i32;
+      targets[i] = tokens[start + i + 1] as i32;
+    }
+  }
+  loader.current_sample = loader.current_sample + 1;
+}
+
+// ----------------------------------------------------------------------------
+// GPT-2 tokenizer, decoding only: a 1 KiB header, then a length byte and the
+// bytes of each token.
+
+struct Tokenizer {
+  bytes : *mut u8,
+  offsets : *mut i64,
+  vocab_size : i64,
+  eot_token : i32,
+  init_ok : bool,
+}
+
+fn tokenizer_init(tok : &mut Tokenizer, path : *const i8) -> void {
+  let mut file = unmapped();
+  tok.init_ok = false;
+  if !map_file(path, &mut file) {
+    print!("---\nWARNING: Failed to open the tokenizer file "); print!(path); print!("\n---\n");
+    return;
+  }
+  let header : *mut i32 = file.data;
+  let version = unsafe { header[1] };
+  tok.vocab_size = unsafe { header[2] as i64 };
+  if version == 1 {
+    tok.eot_token = 50256;
+  } else {
+    tok.eot_token = unsafe { header[3] };
+  }
+  tok.bytes = file.data;
+  tok.offsets = unsafe { calloc(tok.vocab_size, 8) };
+  let offsets = tok.offsets;
+  let bytes = tok.bytes;
+  let mut pos : i64 = 1024;
+  unsafe {
+    for i in 0..tok.vocab_size {
+      offsets[i] = pos;
+      pos = pos + 1 + (bytes[pos] as i64);
+    }
+  }
+  tok.init_ok = true;
+}
+
+// Prints a token, skipping single bytes that are neither printable nor space,
+// as llm.c's safe_printf does.
+fn tokenizer_print(tok : &Tokenizer, token : i32) -> void {
+  let bytes = tok.bytes;
+  let off = unsafe { tok.offsets[token as i64] };
+  let len = unsafe { bytes[off] as i64 };
+  let first = unsafe { bytes[off + 1] as i64 };
+  if first == 0 { return; }
+  if len == 1 {
+    let printable = first >= 32 && first <= 126;
+    let space = first == 32 || (first >= 9 && first <= 13);
+    if !printable && !space { return; }
+  }
+  // printf("%s") stops at the first zero byte. A length byte caps a token at 255.
+  let mut buf = Tensor<u8>([256]);
+  let out : *mut u8 = buf.as_mut_ptr();
+  let mut n : i64 = 0;
+  while n < len && unsafe { bytes[off + 1 + n] as i64 } != 0 {
+    unsafe { out[n] = bytes[off + 1 + n]; }
+    n = n + 1;
+  }
+  unsafe { stdout_write(out, n as u64); }
+}
+
+// ----------------------------------------------------------------------------
+// Sampler.
+
+struct Xorshift {
+  s : u64,
+}
+
+fn random_u32(rng : &mut Xorshift) -> u32 {
+  let mut s = rng.s;
+  s = s ^ (s >> 12u64);
+  s = s ^ (s << 25u64);
+  s = s ^ (s >> 27u64);
+  rng.s = s;
+  return ((s * 2685821657736338717u64) >> 32u64) as u32;
+}
+
+// A float in [0, 1).
+fn random_f32(rng : &mut Xorshift) -> f32 {
+  return ((random_u32(rng) >> 8u32) as f32) / 16777216.0;
+}
+
+// Samples an index from probabilities that sum to 1. `coin` is in [0, 1).
+fn sample_mult(probabilities : *mut f32, n : i64, coin : f32) -> i32 {
+  let mut cdf : f32 = 0.0;
+  for i in 0..n {
+    cdf = cdf + unsafe { probabilities[i] };
+    if coin < cdf { return i as i32; }
+  }
+  return (n - 1) as i32;
+}

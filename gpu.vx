@@ -1,0 +1,540 @@
+// GPT-2 kernels for the GPU, ported from gpt2.vx. Matrix multiplications go
+// to cuBLAS, as in llm.c's train_gpt2_fp32.cu. Every other kernel is a Vx
+// `spawn` block.
+//
+// Vx runs a `spawn` loop in parallel only when each write's first index is the
+// loop variable. So every tensor here is 2-D (rows, columns) in llm.c's memory
+// order, each kernel loops over the rows of the tensor it writes (one GPU
+// thread per row), and a kernel that updates one layer covers the whole tensor
+// and skips the rows outside [lo, lo + n). Reads may use any index.
+//
+// Placement names come from the machine file (`--machine`): `Memory::HBM` and
+// `Topology::Device`, as in Vx's fleet files.
+import core::num;
+
+extern "C" {
+  // cuBLAS. Operation codes: 0 = N, 1 = T. Column-major, as cuBLAS always is.
+  fn cublasSgemm_v2(handle : *mut i8, transa : i32, transb : i32, m : i32, n : i32, k : i32,
+                    alpha : *mut f32, A : *mut f32 in Memory::HBM, lda : i32,
+                    B : *mut f32 in Memory::HBM, ldb : i32, beta : *mut f32,
+                    C : *mut f32 in Memory::HBM, ldc : i32) -> i32;
+  // From gpu/shim.c: the cuBLAS handle, device pointer offsets (Vx has no
+  // pointer arithmetic) and copies between host and device memory.
+  fn vx_cublas() -> *mut i8;
+  fn vx_dev_at(p : *mut f32 in Memory::HBM, off : i64) -> *mut f32 in Memory::HBM;
+  fn vx_upload_i32(dst : *mut i32 in Memory::HBM, src : *mut i32, n : i64) -> i32;
+  fn vx_download_f32(dst : *mut f32, dst_off : i64, src : *mut f32 in Memory::HBM, n : i64) -> i32;
+  fn vx_synchronize() -> i32;
+  fn sqrtf(x : f32) -> f32;
+  fn powf(x : f32, y : f32) -> f32;
+}
+
+// sqrt(2 / pi), rounded the way llm.c's `sqrtf(2.0f / M_PI)` rounds it.
+fn gelu_scale() -> f32 {
+  return unsafe { sqrtf((2.0f64 / 3.141592653589793f64) as f32) };
+}
+
+// ----------------------------------------------------------------------------
+// Matrix multiplications, on row-major buffers.
+
+// out (BT, OC) = inp (BT, C) @ weight (OC, C)^T. The bias is a separate kernel.
+fn cublas_matmul_forward(out : *mut f32 in Memory::HBM, inp : *mut f32 in Memory::HBM,
+                  weight : *mut f32 in Memory::HBM, BT : i32, C : i32, OC : i32) -> void {
+  let mut one : f32 = 1.0;
+  let mut zero : f32 = 0.0;
+  unsafe {
+    cublasSgemm_v2(vx_cublas(), 1, 0, OC, BT, C, (&mut one) as *mut f32, weight, C, inp, C,
+                   (&mut zero) as *mut f32, out, OC);
+  }
+}
+
+// dinp (BT, C) += dout (BT, OC) @ weight (OC, C) and dweight (OC, C) += dout^T @ inp.
+fn cublas_matmul_backward(dinp : *mut f32 in Memory::HBM, dweight : *mut f32 in Memory::HBM,
+                   dout : *mut f32 in Memory::HBM, inp : *mut f32 in Memory::HBM,
+                   weight : *mut f32 in Memory::HBM, BT : i32, C : i32, OC : i32) -> void {
+  // alpha and beta are both 1: accumulate, as the CPU kernels do. Vx allows one
+  // mutable borrow per local, so each argument gets its own.
+  let mut alpha1 : f32 = 1.0;
+  let mut beta1 : f32 = 1.0;
+  let mut alpha2 : f32 = 1.0;
+  let mut beta2 : f32 = 1.0;
+  unsafe {
+    cublasSgemm_v2(vx_cublas(), 0, 0, C, BT, OC, (&mut alpha1) as *mut f32, weight, C, dout, OC,
+                   (&mut beta1) as *mut f32, dinp, C);
+    cublasSgemm_v2(vx_cublas(), 0, 1, C, OC, BT, (&mut alpha2) as *mut f32, inp, C, dout, OC,
+                   (&mut beta2) as *mut f32, dweight, C);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Kernels.
+
+fn k_zero<const R : i32, const C : i32>(t : &mut Tensor<f32, [R, C], Memory::HBM>) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      for c in 0..C { t[r][c] = 0.0; }
+    }
+  }
+  return;
+}
+
+fn k_encoder_forward<const BT : i32, const C : i32, const VP : i32, const MAXT : i32>(
+    out : &mut Tensor<f32, [BT, C], Memory::HBM>, inp : &Tensor<i32, [BT, 1], Memory::HBM>,
+    wte : &Tensor<f32, [VP, C], Memory::HBM>, wpe : &Tensor<f32, [MAXT, C], Memory::HBM>,
+    T : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..BT {
+      let ix = inp[r][0];
+      let t = r % T;
+      for i in 0..C { out[r][i] = wte[ix][i] + wpe[t][i]; }
+    }
+  }
+  return;
+}
+
+// Rows [lo, lo + n) of `out` from rows [in_lo, in_lo + n) of `inp`, with the
+// layer's weights at [w_lo, w_lo + C).
+fn k_layernorm_forward<const R : i32, const RI : i32, const C : i32, const RW : i32>(
+    out : &mut Tensor<f32, [R, C], Memory::HBM>, mean : &mut Tensor<f32, [R, 1], Memory::HBM>,
+    rstd : &mut Tensor<f32, [R, 1], Memory::HBM>, inp : &Tensor<f32, [RI, C], Memory::HBM>,
+    weight : &Tensor<f32, [RW, 1], Memory::HBM>, bias : &Tensor<f32, [RW, 1], Memory::HBM>,
+    in_lo : i32, w_lo : i32, lo : i32, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        let x = in_lo + r - lo;
+        let mut m : f32 = 0.0;
+        for i in 0..C { m = m + inp[x][i]; }
+        m = m / (C as f32);
+        let mut v : f32 = 0.0;
+        for i in 0..C {
+          let xshift = inp[x][i] - m;
+          v = v + xshift * xshift;
+        }
+        v = v / (C as f32);
+        let s = 1.0 / (v + 0.00001).sqrt();
+        for i in 0..C {
+          let nrm = s * (inp[x][i] - m);
+          out[r][i] = nrm * weight[w_lo + i][0] + bias[w_lo + i][0];
+        }
+        mean[r][0] = m;
+        rstd[r][0] = s;
+      }
+    }
+  }
+  return;
+}
+
+fn k_add_bias<const R : i32, const OC : i32, const RB : i32>(
+    out : &mut Tensor<f32, [R, OC], Memory::HBM>, bias : &Tensor<f32, [RB, 1], Memory::HBM>,
+    b_lo : i32, lo : i32, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        for o in 0..OC { out[r][o] = out[r][o] + bias[b_lo + o][0]; }
+      }
+    }
+  }
+  return;
+}
+
+// Attention rows are (l, b, h, t) and qkv rows are (l, b, t). Each thread
+// takes one query position: scores, causal softmax, and the masked tail.
+fn k_attention_scores<const RA : i32, const T : i32, const R : i32, const C3 : i32>(
+    preatt : &mut Tensor<f32, [RA, T], Memory::HBM>, att : &mut Tensor<f32, [RA, T], Memory::HBM>,
+    qkv : &Tensor<f32, [R, C3], Memory::HBM>, NH : i32, BT : i32, l : i32, scale : f32,
+    lo : i32, n : i32) -> void {
+  let C = C3 / 3;
+  let hs = C / NH;
+  spawn on(Topology::Device) {
+    for r in 0..RA {
+      if r >= lo && r < lo + n {
+        let rr = r - lo;
+        let b = rr / (NH * T);
+        let h = (rr / T) % NH;
+        let t = rr % T;
+        let q = l * BT + b * T + t;
+        let mut maxval : f32 = -10000.0;
+        for t2 in 0..(t + 1) {
+          let k = l * BT + b * T + t2;
+          let mut val : f32 = 0.0;
+          for i in 0..hs { val = val + qkv[q][h * hs + i] * qkv[k][C + h * hs + i]; }
+          val = val * scale;
+          if val > maxval { maxval = val; }
+          preatt[r][t2] = val;
+        }
+        let mut expsum : f32 = 0.0;
+        for t2 in 0..(t + 1) {
+          let expv = (preatt[r][t2] - maxval).exp();
+          expsum = expsum + expv;
+          att[r][t2] = expv;
+        }
+        let mut expsum_inv : f32 = 0.0;
+        if expsum != 0.0 { expsum_inv = 1.0 / expsum; }
+        for t2 in 0..T {
+          if t2 <= t {
+            att[r][t2] = att[r][t2] * expsum_inv;
+          } else {
+            att[r][t2] = 0.0;
+          }
+        }
+      }
+    }
+  }
+  return;
+}
+
+// out rows are (l, b, t): the attention-weighted sum of the values, per head.
+fn k_attention_out<const R : i32, const C : i32, const RA : i32, const T : i32, const C3 : i32>(
+    out : &mut Tensor<f32, [R, C], Memory::HBM>, att : &Tensor<f32, [RA, T], Memory::HBM>,
+    qkv : &Tensor<f32, [R, C3], Memory::HBM>, NH : i32, BT : i32, l : i32, lo : i32, n : i32) -> void {
+  let hs = C / NH;
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        let rr = r - lo;
+        let b = rr / T;
+        let t = rr % T;
+        for h in 0..NH {
+          let a = l * BT * NH + b * NH * T + h * T + t;
+          for i in 0..hs {
+            let mut acc : f32 = 0.0;
+            for t2 in 0..(t + 1) {
+              acc = acc + att[a][t2] * qkv[l * BT + b * T + t2][C * 2 + h * hs + i];
+            }
+            out[r][h * hs + i] = acc;
+          }
+        }
+      }
+    }
+  }
+  return;
+}
+
+// out = a + b, row by row: rows [lo, lo + n) of out, from [a_lo, ..) and [b_lo, ..).
+fn k_add<const R : i32, const C : i32, const RA : i32, const RB : i32>(
+    out : &mut Tensor<f32, [R, C], Memory::HBM>, a : &Tensor<f32, [RA, C], Memory::HBM>,
+    b : &Tensor<f32, [RB, C], Memory::HBM>, a_lo : i32, b_lo : i32, lo : i32, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        for c in 0..C { out[r][c] = a[a_lo + r - lo][c] + b[b_lo + r - lo][c]; }
+      }
+    }
+  }
+  return;
+}
+
+// dst += src, row by row: rows [lo, lo + n) of dst, from [src_lo, ..) of src.
+fn k_accumulate<const R : i32, const C : i32, const RS : i32>(
+    dst : &mut Tensor<f32, [R, C], Memory::HBM>, src : &Tensor<f32, [RS, C], Memory::HBM>,
+    src_lo : i32, lo : i32, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        for c in 0..C { dst[r][c] = dst[r][c] + src[src_lo + r - lo][c]; }
+      }
+    }
+  }
+  return;
+}
+
+fn k_gelu_forward<const R : i32, const C : i32>(out : &mut Tensor<f32, [R, C], Memory::HBM>,
+    inp : &Tensor<f32, [R, C], Memory::HBM>, s : f32, lo : i32, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        for c in 0..C {
+          let x = inp[r][c];
+          let cube = 0.044715 * x * x * x;
+          out[r][c] = 0.5 * x * (1.0 + (s * (x + cube)).tanh());
+        }
+      }
+    }
+  }
+  return;
+}
+
+fn k_softmax_forward<const BT : i32, const VP : i32>(probs : &mut Tensor<f32, [BT, VP], Memory::HBM>,
+    logits : &Tensor<f32, [BT, VP], Memory::HBM>, V : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..BT {
+      let mut maxval : f32 = -10000.0;
+      for i in 0..V {
+        if logits[r][i] > maxval { maxval = logits[r][i]; }
+      }
+      let mut sum : f32 = 0.0;
+      for i in 0..V {
+        let e = (logits[r][i] - maxval).exp();
+        probs[r][i] = e;
+        sum = sum + e;
+      }
+      for i in 0..VP {
+        if i < V {
+          probs[r][i] = probs[r][i] / sum;
+        } else {
+          probs[r][i] = 0.0;
+        }
+      }
+    }
+  }
+  return;
+}
+
+fn k_crossentropy_forward<const BT : i32, const VP : i32>(losses : &mut Tensor<f32, [BT, 1], Memory::HBM>,
+    probs : &Tensor<f32, [BT, VP], Memory::HBM>, targets : &Tensor<i32, [BT, 1], Memory::HBM>) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..BT {
+      losses[r][0] = 0.0 - probs[r][targets[r][0]].ln();
+    }
+  }
+  return;
+}
+
+fn k_crossentropy_softmax_backward<const BT : i32, const VP : i32>(
+    dlogits : &mut Tensor<f32, [BT, VP], Memory::HBM>, probs : &Tensor<f32, [BT, VP], Memory::HBM>,
+    targets : &Tensor<i32, [BT, 1], Memory::HBM>, dloss : f32, V : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..BT {
+      let ix = targets[r][0];
+      for i in 0..V {
+        let mut indicator : f32 = 0.0;
+        if i == ix { indicator = 1.0; }
+        dlogits[r][i] = dlogits[r][i] + (probs[r][i] - indicator) * dloss;
+      }
+    }
+  }
+  return;
+}
+
+// dbias[b_lo + o] += the column sum of dout rows [d_lo, d_lo + BT), one thread per output.
+fn k_bias_backward<const RB : i32, const R : i32, const OC : i32>(
+    dbias : &mut Tensor<f32, [RB, 1], Memory::HBM>, dout : &Tensor<f32, [R, OC], Memory::HBM>,
+    b_lo : i32, d_lo : i32, BT : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..RB {
+      if r >= b_lo && r < b_lo + OC {
+        let o = r - b_lo;
+        let mut sum : f32 = 0.0;
+        for bt in 0..BT { sum = sum + dout[d_lo + bt][o]; }
+        dbias[r][0] = dbias[r][0] + sum;
+      }
+    }
+  }
+  return;
+}
+
+// dinp rows [lo, lo + n) from rows [d_lo, ..) of dout, inp, mean and rstd.
+fn k_layernorm_backward_inp<const R : i32, const C : i32, const RD : i32, const RI : i32, const RW : i32>(
+    dinp : &mut Tensor<f32, [R, C], Memory::HBM>, dout : &Tensor<f32, [RD, C], Memory::HBM>,
+    inp : &Tensor<f32, [RI, C], Memory::HBM>, weight : &Tensor<f32, [RW, 1], Memory::HBM>,
+    mean : &Tensor<f32, [RD, 1], Memory::HBM>, rstd : &Tensor<f32, [RD, 1], Memory::HBM>,
+    d_lo : i32, in_lo : i32, w_lo : i32, lo : i32, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        let d = d_lo + r - lo;
+        let x = in_lo + r - lo;
+        let mean_bt = mean[d][0];
+        let rstd_bt = rstd[d][0];
+        let mut dnorm_mean : f32 = 0.0;
+        let mut dnorm_norm_mean : f32 = 0.0;
+        for i in 0..C {
+          let norm_bti = (inp[x][i] - mean_bt) * rstd_bt;
+          let dnorm_i = weight[w_lo + i][0] * dout[d][i];
+          dnorm_mean = dnorm_mean + dnorm_i;
+          dnorm_norm_mean = dnorm_norm_mean + dnorm_i * norm_bti;
+        }
+        dnorm_mean = dnorm_mean / (C as f32);
+        dnorm_norm_mean = dnorm_norm_mean / (C as f32);
+        for i in 0..C {
+          let norm_bti = (inp[x][i] - mean_bt) * rstd_bt;
+          let dnorm_i = weight[w_lo + i][0] * dout[d][i];
+          let mut dval : f32 = 0.0;
+          dval = dval + dnorm_i;
+          dval = dval - dnorm_mean;
+          dval = dval - norm_bti * dnorm_norm_mean;
+          dval = dval * rstd_bt;
+          dinp[r][i] = dinp[r][i] + dval;
+        }
+      }
+    }
+  }
+  return;
+}
+
+// dweight and dbias at [w_lo, w_lo + C): column sums over BT rows from d_lo.
+fn k_layernorm_backward_params<const RW : i32, const RD : i32, const C : i32, const RI : i32>(
+    dweight : &mut Tensor<f32, [RW, 1], Memory::HBM>, dbias : &mut Tensor<f32, [RW, 1], Memory::HBM>,
+    dout : &Tensor<f32, [RD, C], Memory::HBM>, inp : &Tensor<f32, [RI, C], Memory::HBM>,
+    mean : &Tensor<f32, [RD, 1], Memory::HBM>, rstd : &Tensor<f32, [RD, 1], Memory::HBM>,
+    w_lo : i32, d_lo : i32, in_lo : i32, BT : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..RW {
+      if r >= w_lo && r < w_lo + C {
+        let i = r - w_lo;
+        let mut dw : f32 = dweight[r][0];
+        let mut db : f32 = dbias[r][0];
+        for bt in 0..BT {
+          let norm_bti = (inp[in_lo + bt][i] - mean[d_lo + bt][0]) * rstd[d_lo + bt][0];
+          db = db + dout[d_lo + bt][i];
+          dw = dw + norm_bti * dout[d_lo + bt][i];
+        }
+        dweight[r][0] = dw;
+        dbias[r][0] = db;
+      }
+    }
+  }
+  return;
+}
+
+// sech^2 is written as 1 - tanh^2: Vx kernels have tanh but not cosh.
+fn k_gelu_backward<const R : i32, const C : i32>(dinp : &mut Tensor<f32, [R, C], Memory::HBM>,
+    inp : &Tensor<f32, [R, C], Memory::HBM>, dout : &Tensor<f32, [R, C], Memory::HBM>, s : f32,
+    lo : i32, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        for c in 0..C {
+          let x = inp[r][c];
+          let cube = 0.044715 * x * x * x;
+          let tanh_out = (s * (x + cube)).tanh();
+          let sech_out = 1.0 - tanh_out * tanh_out;
+          let local_grad = 0.5 * (1.0 + tanh_out) + x * 0.5 * sech_out * s * (1.0 + 3.0 * 0.044715 * x * x);
+          dinp[r][c] = dinp[r][c] + local_grad * dout[r][c];
+        }
+      }
+    }
+  }
+  return;
+}
+
+// For one query position: datt from the values, then dpreatt through the softmax.
+fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, const C3 : i32, const C : i32>(
+    dpreatt : &mut Tensor<f32, [RA, T], Memory::HBM>, datt : &mut Tensor<f32, [RA, T], Memory::HBM>,
+    att : &Tensor<f32, [RA, T], Memory::HBM>, qkv : &Tensor<f32, [R, C3], Memory::HBM>,
+    dout : &Tensor<f32, [R, C], Memory::HBM>, NH : i32, BT : i32, l : i32, lo : i32, n : i32) -> void {
+  let hs = C / NH;
+  spawn on(Topology::Device) {
+    for r in 0..RA {
+      if r >= lo && r < lo + n {
+        let rr = r - lo;
+        let b = rr / (NH * T);
+        let h = (rr / T) % NH;
+        let t = rr % T;
+        let o = l * BT + b * T + t;
+        for t2 in 0..(t + 1) {
+          let v = l * BT + b * T + t2;
+          let mut acc : f32 = datt[r][t2];
+          for i in 0..hs { acc = acc + qkv[v][C * 2 + h * hs + i] * dout[o][h * hs + i]; }
+          datt[r][t2] = acc;
+        }
+        for t3 in 0..(t + 1) {
+          let mut acc : f32 = dpreatt[r][t3];
+          for t2 in 0..(t + 1) {
+            let mut indicator : f32 = 0.0;
+            if t2 == t3 { indicator = 1.0; }
+            let local_derivative = att[r][t2] * (indicator - att[r][t3]);
+            acc = acc + local_derivative * datt[r][t2];
+          }
+          dpreatt[r][t3] = acc;
+        }
+      }
+    }
+  }
+  return;
+}
+
+// For one position: dquery from the keys before it, and dkey and dvalue from
+// the queries at or after it. Each thread writes only its own row of dqkv.
+fn k_attention_backward_qkv<const R : i32, const C3 : i32, const RA : i32, const T : i32, const C : i32>(
+    dqkv : &mut Tensor<f32, [R, C3], Memory::HBM>, dpreatt : &Tensor<f32, [RA, T], Memory::HBM>,
+    att : &Tensor<f32, [RA, T], Memory::HBM>, qkv : &Tensor<f32, [R, C3], Memory::HBM>,
+    dout : &Tensor<f32, [R, C], Memory::HBM>, NH : i32, BT : i32, l : i32, scale : f32,
+    lo : i32, n : i32) -> void {
+  let hs = C / NH;
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      if r >= lo && r < lo + n {
+        let rr = r - lo;
+        let b = rr / T;
+        let t = rr % T;
+        for h in 0..NH {
+          let a_t = l * BT * NH + b * NH * T + h * T + t;
+          for i in 0..hs {
+            let mut dq : f32 = dqkv[r][h * hs + i];
+            for t2 in 0..(t + 1) {
+              dq = dq + qkv[l * BT + b * T + t2][C + h * hs + i] * dpreatt[a_t][t2] * scale;
+            }
+            dqkv[r][h * hs + i] = dq;
+            let mut dk : f32 = dqkv[r][C + h * hs + i];
+            let mut dv : f32 = dqkv[r][C * 2 + h * hs + i];
+            for tq in t..T {
+              let a_q = l * BT * NH + b * NH * T + h * T + tq;
+              let q = l * BT + b * T + tq;
+              dk = dk + qkv[q][h * hs + i] * dpreatt[a_q][t] * scale;
+              dv = dv + att[a_q][t] * dout[q][h * hs + i];
+            }
+            dqkv[r][C + h * hs + i] = dk;
+            dqkv[r][C * 2 + h * hs + i] = dv;
+          }
+        }
+      }
+    }
+  }
+  return;
+}
+
+// One thread per vocabulary row gathers that token's positions, so no two
+// threads write the same row.
+fn k_encoder_backward_wte<const VP : i32, const C : i32, const BT : i32>(
+    dwte : &mut Tensor<f32, [VP, C], Memory::HBM>, dout : &Tensor<f32, [BT, C], Memory::HBM>,
+    inp : &Tensor<i32, [BT, 1], Memory::HBM>) -> void {
+  spawn on(Topology::Device) {
+    for v in 0..VP {
+      for bt in 0..BT {
+        if inp[bt][0] == v {
+          for i in 0..C { dwte[v][i] = dwte[v][i] + dout[bt][i]; }
+        }
+      }
+    }
+  }
+  return;
+}
+
+fn k_encoder_backward_wpe<const MAXT : i32, const C : i32, const BT : i32>(
+    dwpe : &mut Tensor<f32, [MAXT, C], Memory::HBM>, dout : &Tensor<f32, [BT, C], Memory::HBM>,
+    T : i32) -> void {
+  spawn on(Topology::Device) {
+    for t in 0..MAXT {
+      if t < T {
+        for b in 0..(BT / T) {
+          for i in 0..C { dwpe[t][i] = dwpe[t][i] + dout[b * T + t][i]; }
+        }
+      }
+    }
+  }
+  return;
+}
+
+fn k_adamw<const R : i32, const C : i32>(params : &mut Tensor<f32, [R, C], Memory::HBM>,
+    grads : &Tensor<f32, [R, C], Memory::HBM>, ms : &mut Tensor<f32, [R, C], Memory::HBM>,
+    vs : &mut Tensor<f32, [R, C], Memory::HBM>, learning_rate : f32, beta1 : f32, beta2 : f32,
+    eps : f32, weight_decay : f32, beta1_correction : f32, beta2_correction : f32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..R {
+      for c in 0..C {
+        let param = params[r][c];
+        let g = grads[r][c];
+        let m = beta1 * ms[r][c] + (1.0 - beta1) * g;
+        let v = beta2 * vs[r][c] + (1.0 - beta2) * g * g;
+        let m_hat = m / beta1_correction;
+        let v_hat = v / beta2_correction;
+        ms[r][c] = m;
+        vs[r][c] = v;
+        params[r][c] = param - learning_rate * (m_hat / (v_hat.sqrt() + eps) + weight_decay * param);
+      }
+    }
+  }
+  return;
+}

@@ -3,7 +3,7 @@ VXC := Vx/target/release/vxc
 VXENV := source Vx/config.local && export VX_STD_PATH=$(CURDIR)/Vx/stdlib/std:$(CURDIR)/Vx/stdlib &&
 SHELL := /bin/bash
 
-.PHONY: test ref train train-check clean
+.PHONY: test ref train train-check gpu-test clean
 
 test: build/ref_model.bin
 	$(VXENV) $(VXC) test_gpt2.vx -O3
@@ -35,6 +35,15 @@ train-check: build/ref_model.bin
 	cd build/llmc_run && ../llmc_train > ../llmc_train.txt
 	$(VXENV) $(VXC) ref/train_small.vx -O3 2>/dev/null | grep -v '^\[' > build/vx_train.txt
 	python3 ref/compare_train.py build/llmc_train.txt build/vx_train.txt
+
+# The GPU program's test mode on the small reference. Without the CUDA plugin
+# (any Mac), Vx runs the kernels on the CPU and the shim stands in for cuBLAS.
+MACHINE ?= machines/dev.vx
+SHIM_FLAGS ?=
+gpu-test: build/ref_model.bin
+	python3 gpu-support/gen_train_gpu.py
+	$(CC) -O2 $(SHIM_FLAGS) -c gpu-support/shim.c -o build/shim.o
+	$(VXENV) VX_SHIM=$(CURDIR)/build/shim.o CLANG_PATH=$(CURDIR)/gpu-support/clang-link.sh $(VXC) ref/test_gpu_small.vx --machine $(MACHINE) -O3
 
 clean:
 	rm -rf build

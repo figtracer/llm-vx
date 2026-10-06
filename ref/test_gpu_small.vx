@@ -1,0 +1,8 @@
+// train_gpu.vx's test mode on the small random GPT-2 from ref/make_ref.c.
+import train_gpu;
+
+fn main() -> i32 {
+  // L, NH, C, 3C, 4C, Vp, V, maxT, B, T, B*T, L*B*T, L*B*NH*T, L*C, L*3C, L*4C
+  return run<2, 4, 64, 192, 256, 512, 500, 64, 4, 16, 64, 128, 512, 128, 384, 512>(0,
+    "build/ref_model.bin", "build/ref_state.bin", "build/ref_losses.bin", "", "", "");
+}
