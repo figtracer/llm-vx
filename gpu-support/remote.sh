@@ -40,11 +40,13 @@ export PATH=/usr/lib/llvm-22/bin:$PATH
 # NVIDIA's wheels have the headers, the runtime, cuBLAS and libdevice; the
 # driver library comes with the GPU.
 log cuda
-pip install -q --break-system-packages nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvcc-cu12 2>/dev/null \
-  || pip install -q nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvcc-cu12
+pip install -q --break-system-packages nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvcc-cu12 nvidia-cuda-cccl-cu12 2>/dev/null \
+  || pip install -q nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvcc-cu12 nvidia-cuda-cccl-cu12
 NV=$(python3 -c 'import nvidia; print(list(nvidia.__path__)[0])')
 mkdir -p /opt/cuda/include /opt/cuda/lib64/stubs
-cp -r "$NV"/cuda_runtime/include/. "$NV"/cublas/include/. /opt/cuda/include/
+# The runtime headers include crt/ (from nvcc) and nv/target (from CCCL).
+cp -r "$NV"/cuda_runtime/include/. "$NV"/cublas/include/. "$NV"/cuda_nvcc/include/. "$NV"/cuda_cccl/include/. \
+  /opt/cuda/include/
 for lib in "$NV"/cuda_runtime/lib/libcudart.so.12 "$NV"/cublas/lib/libcublas.so.12 "$NV"/cublas/lib/libcublasLt.so.12; do
   base=$(basename "$lib")
   ln -sf "$lib" /opt/cuda/lib64/"$base"

@@ -49,7 +49,7 @@ gpu-test: build/ref_model.bin
 gpu-train-check: train-check
 	$(CC) -O2 $(SHIM_FLAGS) -c gpu-support/shim.c -o build/shim.o
 	$(VXENV) VX_SHIM=$(CURDIR)/build/shim.o CLANG_PATH=$(CURDIR)/gpu-support/clang-link.sh $(VXC) ref/train_gpu_small.vx --machine $(MACHINE) -O3 2>/dev/null | grep -v '^\[' > build/vx_gpu_train.txt
-	python3 ref/compare_train.py build/llmc_train.txt build/vx_gpu_train.txt
+	python3 ref/compare_train.py build/llmc_train.txt build/vx_gpu_train.txt --tol 0.001
 
 clean:
 	rm -rf build

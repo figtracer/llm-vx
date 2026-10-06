@@ -10,7 +10,7 @@ grep -ic 'launch' $OUT/test_gpu_small.log
 grep -i 'launch\|cublas\|dispatch' $OUT/test_gpu_small.log | sort | uniq -c | sort -rn | head -12
 $VXC ref/train_gpu_small.vx --machine machines/dev.vx -O3 2> $OUT/train_gpu_small.err | grep -v '^\[' > $OUT/vx_gpu_train.txt
 echo "train exit $?"
-make train-check >/dev/null 2>&1; python3 ref/compare_train.py build/llmc_train.txt $OUT/vx_gpu_train.txt | tee $OUT/compare_small.txt
+make train-check >/dev/null 2>&1; python3 ref/compare_train.py build/llmc_train.txt $OUT/vx_gpu_train.txt --tol 0.001 | tee $OUT/compare_small.txt
 python3 gpu-support/probe.py | tee $OUT/probe.txt
 mkdir -p build/rnd124
 cc -O2 ref/make_random.c -o build/make_random && build/make_random build/rnd124 1024 50257 50304 12 12 768 40000

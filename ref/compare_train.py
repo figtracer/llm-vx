@@ -2,6 +2,10 @@
 
 llm.c prints losses with "%f". Vx prints the shortest text that reads back as
 the same f32, so each Vx loss is read back as an f32 and printed with "%f".
+
+usage: compare_train.py LLMC_OUTPUT VX_OUTPUT [--tol ABS]
+Without --tol every loss must print the same. The GPU program sums in another
+order (cuBLAS), so its runs pass a tolerance.
 """
 import re
 import struct
@@ -21,14 +25,21 @@ def as_c(loss):
     return '%f' % f32
 
 
+tol = float(sys.argv[sys.argv.index('--tol') + 1]) if '--tol' in sys.argv else None
 c_val, c_train, c_samples = parse(sys.argv[1])
 vx_val, vx_train, vx_samples = parse(sys.argv[2])
 ok = True
 for name, c, vx in [('val loss', c_val, vx_val), ('train loss', c_train, vx_train)]:
     vx = [as_c(x) for x in vx]
-    same = c == vx and len(c) > 0
+    if tol is None:
+        same = c == vx and len(c) > 0
+        print(f'{name}: {len(c)} values, {"identical" if same else "DIFFERENT"}')
+    else:
+        diffs = [abs(float(a) - float(b)) for a, b in zip(c, vx)]
+        same = len(c) == len(vx) > 0 and max(diffs) <= tol
+        print(f'{name}: {len(c)} values, largest difference {max(diffs, default=0):.6f}, '
+              f'{"within" if same else "OVER"} {tol}')
     ok = ok and same
-    print(f'{name}: {len(c)} values, {"identical" if same else "DIFFERENT"}')
     if not same:
         for i, (a, b) in enumerate(zip(c, vx)):
             if a != b:
