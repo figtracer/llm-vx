@@ -96,9 +96,9 @@ of scattering, because Vx has no atomics.
 ## Limits and workarounds
 
 - **Speed.** The GPU program is correct, but not yet fast. The runs above took 24 s per step on both
-  cards: B=4 on the L4 and B=17 on the H100. Almost all of that was one loop from llm.c's CPU code.
-  Softmax backward summed an O(T^2) expression for every row, about T^3/3 multiply-adds per
-  attention head. It now uses the O(T) form from llm.c's CUDA version, and dquery, dkey and dvalue
+  cards: B=4 on the L4 and B=17 on the H100. By count, most of that was one loop from llm.c's CPU
+  code: softmax backward summed an O(T^2) expression for every row, about T^3/3 multiply-adds per
+  attention head, or 200 billion per step. It now uses the O(T) form from llm.c's CUDA version, and dquery, dkey and dvalue
   run one thread per head and position. A run on the GPU with this change is still to come.
 - **Machine files.** The program uses the built-in `Topology::GPU` and `Memory::GPU_HBM`: Vx's CUDA
   runtime sends only built-in topologies to a device, so the fleet files' `Topology Device` would
