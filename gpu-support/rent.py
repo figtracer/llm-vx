@@ -1,10 +1,12 @@
 """Runs a job on a rented GPU through Fission: build Vx with CUDA, run the job, collect /workspace/out.
 
-usage: rent.py GPU JOB [--duration 3h] [--work 2h] [--budget 4] [--approve]
+usage: rent.py GPU JOB [--duration 3h] [--work 2h] [--budget 4] [--keep] [--approve]
 
 Without --approve it prints the quote and stops. A failed or unclear purchase
 is never retried: Fission keeps the record, and the next attempt needs a new
-name and a new decision.
+name and a new decision. With --keep, a failed job leaves the prepaid sandbox
+open so a fix can run there; Fission uploads never overwrite, so upload fixed
+files under new names, and close the sandbox when done.
 """
 import argparse
 import json
@@ -51,6 +53,7 @@ def main():
     parser.add_argument('--work', default='2h')
     parser.add_argument('--budget', default='4')
     parser.add_argument('--name')
+    parser.add_argument('--keep', action='store_true')
     parser.add_argument('--approve', action='store_true')
     args = parser.parse_args()
     job = ROOT / 'gpu-support/jobs' / f'{args.job}.sh'
@@ -67,6 +70,7 @@ def main():
     bundle = out / 'llm-vx.tgz'
     package(bundle)
     status = None
+    failed = False
     try:
         state = fission('open', name, '--plan', plan['id'], '--approve')
         if not (state.get('guestGpu') or {}).get('verified'):
@@ -79,13 +83,20 @@ def main():
                 'bash', '/workspace/remote.sh', 'bash', f'gpu-support/jobs/{args.job}.sh')
         result = fission('wait', name, args.job, '--duration', args.work, '--max-spend', '0.05', check=False)
         print(json.dumps(result if isinstance(result, str) else {k: result.get(k) for k in ['phase', 'waitingStopped']}))
+        failed = not isinstance(result, dict) or result.get('phase') != 'succeeded'
         fission('download', name, f'/workspace/.fission/jobs/{args.job}/output.log', str(out / 'output.log'),
                 check=False)
         # Downloads come back 48 KB per paid call, so only small text results.
         for remote in ['test_gpu_small.log', 'vx_gpu_train.txt', 'compare_small.txt', 'probe.txt',
                        'bench_b4.log', 'bench_b5.log', 'results.txt']:
             fission('download', name, f'/workspace/out/{remote}', str(out / remote), check=False)
+    except Exception:
+        failed = True
+        raise
     finally:
+        if failed and args.keep:
+            print(f'kept {name} open; close it with: fission advanced close {name} --discard-output')
+            return
         fission('close', name, '--discard-output', check=False)
         for _ in range(8):
             status = fission('status', name, '--refresh', '--json', check=False)
