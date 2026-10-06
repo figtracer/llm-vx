@@ -431,15 +431,14 @@ fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, con
           for i in 0..hs { acc = acc + qkv[v][C * 2 + h * hs + i] * dout[o][h * hs + i]; }
           datt[r][t2] = acc;
         }
+        // Softmax backward in O(T), as llm.c's CUDA version computes it:
+        // dpreatt[t3] = att[t3] * (datt[t3] - sum over t2 of att[t2] * datt[t2]).
+        // llm.c's CPU code sums the O(T^2) form, which differs only in rounding
+        // and costs about T^3 / 3 multiply-adds per head.
+        let mut dot : f32 = 0.0;
+        for t2 in 0..(t + 1) { dot = dot + att[r][t2] * datt[r][t2]; }
         for t3 in 0..(t + 1) {
-          let mut acc : f32 = dpreatt[r][t3];
-          for t2 in 0..(t + 1) {
-            let mut indicator : f32 = 0.0;
-            if t2 == t3 { indicator = 1.0; }
-            let local_derivative = att[r][t2] * (indicator - att[r][t3]);
-            acc = acc + local_derivative * datt[r][t2];
-          }
-          dpreatt[r][t3] = acc;
+          dpreatt[r][t3] = dpreatt[r][t3] + att[r][t3] * (datt[r][t3] - dot);
         }
       }
     }
@@ -447,13 +446,59 @@ fn k_attention_backward_scores<const RA : i32, const T : i32, const R : i32, con
   return;
 }
 
-// For one position: dquery from the keys before it, and dkey and dvalue from
-// the queries at or after it. Each thread writes only its own row of dqkv.
-fn k_attention_backward_qkv<const R : i32, const C3 : i32, const RA : i32, const T : i32, const C : i32>(
-    dqkv : &mut Tensor<f32, [R, C3], Memory::GPU_HBM>, dpreatt : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
+// One part of dqkv (0 dquery, 1 dkey, 2 dvalue) for one (batch, head, position),
+// into the first hs columns of that row of `scratch`. The caller passes datt,
+// which no later kernel reads. One thread per row of att: twelve times as many
+// threads as one per position. dquery sums over the keys before the position,
+// dkey and dvalue over the queries at or after it. The second loop runs over
+// every query and skips the earlier ones, so a warp reads one row of att and
+// dpreatt at a time.
+fn k_attention_backward_part<const RA : i32, const T : i32, const R : i32, const C3 : i32, const C : i32>(
+    scratch : &mut Tensor<f32, [RA, T], Memory::GPU_HBM>, dpreatt : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
     att : &Tensor<f32, [RA, T], Memory::GPU_HBM>, qkv : &Tensor<f32, [R, C3], Memory::GPU_HBM>,
-    dout : &Tensor<f32, [R, C], Memory::GPU_HBM>, NH : i32, BT : i32, l : i32, scale : f32,
+    dout : &Tensor<f32, [R, C], Memory::GPU_HBM>, NH : i32, BT : i32, l : i32, scale : f32, part : i32,
     lo : i32, n : i32) -> void {
+  let hs = C / NH;
+  spawn on(Topology::GPU) {
+    for r in 0..RA {
+      if r >= lo && r < lo + n {
+        let rr = r - lo;
+        let b = rr / (NH * T);
+        let h = (rr / T) % NH;
+        let t = rr % T;
+        let a0 = lo + b * NH * T + h * T;
+        for i in 0..hs {
+          let mut acc : f32 = 0.0;
+          if part == 0 {
+            for t2 in 0..(t + 1) {
+              acc = acc + qkv[l * BT + b * T + t2][C + h * hs + i] * dpreatt[r][t2] * scale;
+            }
+          } else if part == 1 {
+            for tq in 0..T {
+              if tq >= t {
+                acc = acc + qkv[l * BT + b * T + tq][h * hs + i] * dpreatt[a0 + tq][t] * scale;
+              }
+            }
+          } else {
+            for tq in 0..T {
+              if tq >= t {
+                acc = acc + att[a0 + tq][t] * dout[l * BT + b * T + tq][h * hs + i];
+              }
+            }
+          }
+          scratch[r][i] = acc;
+        }
+      }
+    }
+  }
+  return;
+}
+
+// dqkv += one part of it from `scratch`, for rows [lo, lo + n) of dqkv: each
+// position collects its heads.
+fn k_attention_backward_gather<const R : i32, const C3 : i32, const RA : i32, const T : i32, const C : i32>(
+    dqkv : &mut Tensor<f32, [R, C3], Memory::GPU_HBM>, scratch : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
+    NH : i32, BT : i32, l : i32, part : i32, lo : i32, n : i32) -> void {
   let hs = C / NH;
   spawn on(Topology::GPU) {
     for r in 0..R {
@@ -462,23 +507,9 @@ fn k_attention_backward_qkv<const R : i32, const C3 : i32, const RA : i32, const
         let b = rr / T;
         let t = rr % T;
         for h in 0..NH {
-          let a_t = l * BT * NH + b * NH * T + h * T + t;
+          let a = l * BT * NH + b * NH * T + h * T + t;
           for i in 0..hs {
-            let mut dq : f32 = dqkv[r][h * hs + i];
-            for t2 in 0..(t + 1) {
-              dq = dq + qkv[l * BT + b * T + t2][C + h * hs + i] * dpreatt[a_t][t2] * scale;
-            }
-            dqkv[r][h * hs + i] = dq;
-            let mut dk : f32 = dqkv[r][C + h * hs + i];
-            let mut dv : f32 = dqkv[r][C * 2 + h * hs + i];
-            for tq in t..T {
-              let a_q = l * BT * NH + b * NH * T + h * T + tq;
-              let q = l * BT + b * T + tq;
-              dk = dk + qkv[q][h * hs + i] * dpreatt[a_q][t] * scale;
-              dv = dv + att[a_q][t] * dout[q][h * hs + i];
-            }
-            dqkv[r][C + h * hs + i] = dk;
-            dqkv[r][C * 2 + h * hs + i] = dv;
+            dqkv[r][part * C + h * hs + i] = dqkv[r][part * C + h * hs + i] + scratch[a][i];
           }
         }
       }
