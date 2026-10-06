@@ -1,0 +1,83 @@
+[GPT-2]
+max_seq_len: 1024
+vocab_size: 50257
+padded_vocab_size: 50304
+num_layers: 12
+num_heads: 12
+channels: 768
+num_parameters: 124475904
+train dataset num_batches: 1192
+val dataset num_batches: 128
+num_activations: 73347840
+val loss 5.3254137
+step 0: train loss 4.677649 (took 8690.505981445313 ms)
+step 1: train loss 5.1908293 (took 9661.781072616577 ms)
+step 2: train loss 4.4377394 (took 10299.80206489563 ms)
+step 3: train loss 4.1382146 (took 9132.819890975952 ms)
+step 4: train loss 4.1445313 (took 9317.978858947754 ms)
+step 5: train loss 3.8342464 (took 9263.283967971802 ms)
+step 6: train loss 4.2977962 (took 9478.214979171753 ms)
+step 7: train loss 4.2803936 (took 9259.954929351807 ms)
+step 8: train loss 4.2495656 (took 9151.971101760864 ms)
+step 9: train loss 4.3921866 (took 9007.57884979248 ms)
+val loss 4.4158816
+step 10: train loss 3.9111977 (took 8730.835914611816 ms)
+step 11: train loss 3.7386296 (took 8754.266023635864 ms)
+step 12: train loss 3.840885 (took 8759.115219116211 ms)
+step 13: train loss 4.3673954 (took 8730.883121490479 ms)
+step 14: train loss 4.1309404 (took 8750.95009803772 ms)
+step 15: train loss 4.013473 (took 8768.446207046509 ms)
+step 16: train loss 3.7963212 (took 8705.708026885986 ms)
+step 17: train loss 4.3570623 (took 8700.141191482544 ms)
+step 18: train loss 3.7666194 (took 8690.932035446167 ms)
+step 19: train loss 4.5524445 (took 8623.008012771606 ms)
+val loss 4.331538
+generating:
+---
+
+I am Rouset:
+As for my brother, my brother,
+I hope be pursued.
+Dearest, hear me speak.
+
+<|endoftext|>JOINED ART:
+One's addressed as 'Governor Chapel,'
+Nay, I weary our NHS as
+Buthow could shamble
+---
+step 20: train loss 4.530054 (took 8410.408973693848 ms)
+step 21: train loss 4.067404 (took 8446.362972259521 ms)
+step 22: train loss 3.9690106 (took 8405.839204788208 ms)
+step 23: train loss 3.4501379 (took 8490.828037261963 ms)
+step 24: train loss 4.493862 (took 8506.839036941528 ms)
+step 25: train loss 4.0367727 (took 8522.495031356812 ms)
+step 26: train loss 3.4429255 (took 8385.320901870728 ms)
+step 27: train loss 3.9936793 (took 8324.481964111328 ms)
+step 28: train loss 4.2016788 (took 8261.30199432373 ms)
+step 29: train loss 4.5424414 (took 8252.348899841309 ms)
+val loss 4.3029013
+step 30: train loss 4.3060126 (took 8808.290004730225 ms)
+step 31: train loss 4.8541465 (took 9045.96209526062 ms)
+step 32: train loss 4.5837116 (took 9224.52998161316 ms)
+step 33: train loss 4.1228676 (took 9336.24005317688 ms)
+step 34: train loss 4.334544 (took 10194.95701789856 ms)
+step 35: train loss 3.401594 (took 11646.780014038086 ms)
+step 36: train loss 3.6617303 (took 12449.785947799683 ms)
+step 37: train loss 3.3312042 (took 11731.855154037476 ms)
+step 38: train loss 3.5708954 (took 11794.381141662598 ms)
+step 39: train loss 3.904979 (took 39553.96389961243 ms)
+val loss 4.294082
+generating:
+---
+Maduki Kenya:
+Good, sir!
+
+<|endoftext|>DESONATION:
+Thus said you, madam;
+And now.<|endoftext|>RENU:
+As distinguished as we may choose to speak. Romeo and Juliet,
+Dost thou say, children, I mean, of charms?
+With her
+---
+step 40: train loss 3.9534776 (took 14812.774181365967 ms)
+

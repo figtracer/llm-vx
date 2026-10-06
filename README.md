@@ -10,11 +10,16 @@ GPT-2 training in [Vx](https://github.com/vx-lang/Vx), ported from Karpathy's
 
 ## Results
 
+**GPT-2 124M trains on tiny Shakespeare in Vx exactly as in llm.c.** `make train` and llm.c's own
+`train_gpt2` produce the same 41 training losses, the same 5 validation losses (5.325 to 4.294) and
+the same generated text (`results/cpu/`). Against llm.c's PyTorch reference, `make test` passes:
+logits within 1.4e-3, loss 5.26989 vs 5.27001, every gradient within llm.c's tolerances, and the
+ten training losses down to 0.378 vs 0.3765. One step takes 7.8 s on one Mac core.
+
 **The CPU port matches llm.c bit for bit.** On a random-weight GPT-2, `make test` compares logits,
 loss, all 16 parameter gradients and ten AdamW steps with llm.c's C code; every difference is 0.
-`make train-check` runs llm.c's own `train_gpt2` and the Vx loop on the same files: all 41 training
-losses, 5 validation losses and 126 sampled tokens are identical, shuffled batch order included.
-Vx compiles the kernels with the same speed as C at `-O3` (12 ms vs 13 ms per step, single thread).
+`make train-check` does the same for the whole training loop, shuffled batch order included. Vx
+compiles the kernels to the same speed as C at `-O3`.
 
 **The compiler knows the largest batch before a GPU is rented.** `gpu-support/admit.py` compiles
 `train_gpu.vx` for GPT-2 124M at T=1024 against each GPU's capacity, in about 0.2 s per verdict:
