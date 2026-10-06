@@ -9,12 +9,14 @@
 set -euo pipefail
 log() { echo "== $(date +%T) $*"; }
 
+# The facts below are informational: none may stop the run (Modal's image has
+# no `free`, for one).
 log machine
-nproc
-free -g
-df -h /workspace | tail -1
-head -2 /etc/os-release
-nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader
+nproc || true
+grep MemTotal /proc/meminfo || true
+df -h /workspace | tail -1 || true
+head -2 /etc/os-release || true
+nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader || true
 
 mkdir -p /workspace/out
 cd /workspace
@@ -50,10 +52,18 @@ for lib in "$NV"/cuda_runtime/lib/libcudart.so.12 "$NV"/cublas/lib/libcublas.so.
 done
 DRIVER=$(ldconfig -p | awk '/libcuda.so.1 / {print $NF; exit}')
 [ -n "$DRIVER" ] || DRIVER=$(find / -name 'libcuda.so.1' 2>/dev/null | head -1)
-ln -sf "$DRIVER" /opt/cuda/lib64/stubs/libcuda.so
-ls -la /opt/cuda/lib64 /opt/cuda/lib64/stubs
 test -f /opt/cuda/include/cuda.h
-export CUDA_HOME=/opt/cuda
+if [ -n "$DRIVER" ]; then
+  ln -sf "$DRIVER" /opt/cuda/lib64/stubs/libcuda.so
+  export CUDA_HOME=/opt/cuda
+  SHIM_CUDA=-DVX_CUDA
+else
+  # No NVIDIA driver: build Vx without its CUDA plugin, so the same run works
+  # on any Linux host, with kernels on the CPU.
+  log "no NVIDIA driver; building Vx without CUDA"
+  export VX_DISABLE_CUDA=1
+  SHIM_CUDA=
+fi
 export VX_LIBDEVICE="$NV"/cuda_nvcc/nvvm/libdevice/libdevice.10.bc
 export LD_LIBRARY_PATH=/opt/cuda/lib64:${LD_LIBRARY_PATH:-}
 test -f "$VX_LIBDEVICE"
@@ -78,13 +88,24 @@ log build vx
 cd /workspace/llm-vx/Vx
 ./setup.sh >/dev/null
 source config.local
-cargo build --release --locked --bin vxc -p vxc 2>&1 | tail -3
-cargo build --release --locked -p vx_std_core 2>&1 | tail -1
+# Sandboxes have one vCPU, and the release profile's thin LTO with one codegen
+# unit is the slowest build there is. vxc's own speed hardly matters here: the
+# programs it emits are optimized by LLVM at -O3 either way.
+export CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_OPT_LEVEL=1
+build() {
+  if ! cargo build --release --locked "$@" > /workspace/out/cargo.log 2>&1; then
+    tail -60 /workspace/out/cargo.log
+    exit 1
+  fi
+  tail -1 /workspace/out/cargo.log
+}
+build --bin vxc -p vxc
+build -p vx_std_core
 
 log build shim
 cd /workspace/llm-vx
 mkdir -p build
-cc -O2 -DVX_CUDA -I/opt/cuda/include -c gpu-support/shim.c -o build/shim.o
+cc -O2 $SHIM_CUDA -I/opt/cuda/include -c gpu-support/shim.c -o build/shim.o
 export VX_STD_PATH=$PWD/Vx/stdlib/std:$PWD/Vx/stdlib
 export VX_SHIM=$PWD/build/shim.o
 export CLANG_PATH=$PWD/gpu-support/clang-link.sh
