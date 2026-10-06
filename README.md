@@ -10,15 +10,17 @@
 
 ---
 
-llm.vx trains GPT-2 exactly as llm.c does, written in Vx. Before you rent a GPU, the compiler
-tells you the largest batch that fits on it.
+llm.vx is Karpathy's llm.c rewritten in Vx: the same GPT-2 training, kernel for kernel, on the CPU
+and on NVIDIA GPUs. Vx tracks where every tensor lives, so the compiler also checks that a whole
+training step fits in GPU memory.
 
 ## Highlights
 
-- 🎯 On an H100, Vx admits batch 17 and rejects batch 18 at compile time. On the card, 17 trains
-  and 18 runs out of memory. Same on an L4 with 4 and 5 ([results](docs/results.md)).
 - ✅ The CPU port matches llm.c bit for bit: every logit, gradient and loss.
 - 🖥️ The GPU program matches llm.c to every printed digit of the losses, on an L4 and an H100.
+- 🎯 The compiler's memory check is exact: on an H100 it admits batch 17 and rejects batch 18, and
+  on the card 17 trains and 18 runs out of memory. Same on an L4 with 4 and 5
+  ([results](docs/results.md)).
 - ⚠️ The answer is only as good as the machine file: Vx's own H100 file says 80 GiB and admits 18.
 
 ## Quick start
@@ -48,7 +50,7 @@ H100 80 GiB 18 84460699648 17
 | `make gpu-train-check` | GPU training loop vs llm.c's `train_gpt2` |
 | `make admit` | Compile-time batch limits per GPU |
 | `make train` | GPT-2 124M on tiny Shakespeare; needs llm.c's starter pack in `data/` |
-| `python3 gpu-support/rent.py L4 l4` | Rent a GPU and run a job there ([details](docs/gpu.md#running-on-a-rented-gpu)) |
+| `python3 gpu-support/rent.py L4 l4` | Run the GPU checks on a rented NVIDIA GPU ([details](docs/gpu.md#running-on-a-rented-gpu)) |
 
 ## What is and is not checked
 
