@@ -3,10 +3,13 @@
 # the CUDA headers and libraries, builds Vx with its CUDA plugin, then runs the
 # commands given as arguments from /workspace/llm-vx with the toolchain set up.
 #
-# Expects /workspace/llm-vx.tgz: this repository without its submodules, plus
+# Expects /workspace/llm-vx.tgz (or $VX_BUNDLE): this repository without its submodules, plus
 # llm-vx/submodules.txt naming the Vx and llm.c commits to fetch. Uploads go
 # through Fission 4 KiB at a time, so the sandbox fetches large sources itself.
 set -euo pipefail
+# Fission sandboxes run with a private umask, so a key written to /etc/apt is
+# unreadable to apt's own user and the LLVM repository counts as unsigned.
+umask 022
 log() { echo "== $(date +%T) $*"; }
 
 # The facts below are informational: none may stop the run (Modal's image has
@@ -20,10 +23,12 @@ nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv
 
 mkdir -p /workspace/out
 cd /workspace
-tar xzf llm-vx.tgz
+tar xzf "${VX_BUNDLE:-llm-vx.tgz}"
 
 export DEBIAN_FRONTEND=noninteractive
 log apt
+# A rerun on the same sandbox finds the LLVM repository already added.
+chmod a+r /etc/apt/trusted.gpg.d/*.asc 2>/dev/null || true
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build pkg-config git curl \
   wget ca-certificates gnupg lsb-release libffi-dev zlib1g-dev libzstd-dev \
