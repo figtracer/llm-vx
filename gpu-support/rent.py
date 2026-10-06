@@ -16,9 +16,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'results/runs'
-REF_FILES = ['ref_model.bin', 'ref_state.bin', 'ref_losses.bin', 'train_tokens.bin', 'val_tokens.bin',
-             'tokenizer.bin', 'llmc_train.txt']
-SKIP = {'.git', 'target', '.cargo', 'config.local', 'llm.c', 'build', 'data', 'results'}
+SKIP = {'.git', 'Vx', 'llm.c', 'build', 'data', 'results'}
+SUBMODULES = {'Vx': 'https://github.com/vx-lang/Vx', 'llm.c': 'https://github.com/karpathy/llm.c'}
 
 
 def fission(*args, check=True):
@@ -31,14 +30,17 @@ def fission(*args, check=True):
 
 
 def package(path):
-    """The repository and Vx's sources, without build outputs, plus the small references."""
+    """The repository without its submodules, plus the submodule commits for the sandbox to fetch."""
     def keep(info):
         parts = Path(info.name).parts
-        return None if any(p in SKIP for p in parts[1:]) else info
+        return None if any(p in SKIP for p in parts[1:2]) else info
+    pins = ''.join(f"{d} {url} {subprocess.run(['git', '-C', str(ROOT / d), 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()}\n"
+                   for d, url in SUBMODULES.items())
+    (ROOT / 'build').mkdir(exist_ok=True)
+    (ROOT / 'build/submodules.txt').write_text(pins)
     with tarfile.open(path, 'w:gz') as tar:
         tar.add(ROOT, arcname='llm-vx', filter=keep)
-        for name in REF_FILES:
-            tar.add(ROOT / 'build' / name, arcname=f'llm-vx/build/{name}')
+        tar.add(ROOT / 'build/submodules.txt', arcname='llm-vx/submodules.txt')
 
 
 def main():
@@ -79,8 +81,9 @@ def main():
         print(json.dumps(result if isinstance(result, str) else {k: result.get(k) for k in ['phase', 'waitingStopped']}))
         fission('download', name, f'/workspace/.fission/jobs/{args.job}/output.log', str(out / 'output.log'),
                 check=False)
+        # Downloads come back 48 KB per paid call, so only small text results.
         for remote in ['test_gpu_small.log', 'vx_gpu_train.txt', 'compare_small.txt', 'probe.txt',
-                       'bench_b4.log', 'bench_b5.log', 'vx-toolchain.tgz']:
+                       'bench_b4.log', 'bench_b5.log', 'results.txt']:
             fission('download', name, f'/workspace/out/{remote}', str(out / remote), check=False)
     finally:
         fission('close', name, '--discard-output', check=False)

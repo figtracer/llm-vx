@@ -3,7 +3,9 @@
 # the CUDA headers and libraries, builds Vx with its CUDA plugin, then runs the
 # commands given as arguments from /workspace/llm-vx with the toolchain set up.
 #
-# Expects /workspace/llm-vx.tgz (this repository and Vx's sources).
+# Expects /workspace/llm-vx.tgz: this repository without its submodules, plus
+# llm-vx/submodules.txt naming the Vx and llm.c commits to fetch. Uploads go
+# through Fission 4 KiB at a time, so the sandbox fetches large sources itself.
 set -euo pipefail
 log() { echo "== $(date +%T) $*"; }
 
@@ -59,6 +61,18 @@ test -f "$VX_LIBDEVICE"
 log rust
 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
 source "$HOME/.cargo/env"
+
+log sources
+cd /workspace/llm-vx
+if [ -f submodules.txt ]; then
+  while read -r dir url sha; do
+    rm -rf "$dir"
+    git init -q "$dir"
+    git -C "$dir" fetch -q --depth 1 "$url" "$sha"
+    git -C "$dir" checkout -q FETCH_HEAD
+  done < submodules.txt
+fi
+[ -f build/ref_model.bin ] || make ref >/dev/null
 
 log build vx
 cd /workspace/llm-vx/Vx
