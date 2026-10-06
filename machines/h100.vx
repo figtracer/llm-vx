@@ -1,0 +1,5 @@
+// NVIDIA H100 SXM, as Vx's fleet/h100-sxm.vx declares it. Same departures from Vx's fleet files as machines/dev.vx.
+Memory CPU_DRAM {}
+Memory GPU_HBM {
+  within: Memory::CPU_DRAM, capacity: 80 GiB, bandwidth: 3 TB/s, managed: cached, scope: device
+}
