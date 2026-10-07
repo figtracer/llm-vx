@@ -17,13 +17,17 @@ LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is no
 [JIT] Linking native executable...
 [JIT] Executing native binary...
 [GPT-2 on GPU, train]
-step 0: train loss 10.824958 (took 1062.1235370635986 ms)
-step 1: train loss 10.824741 (took 805.0150871276855 ms)
-step 2: train loss 10.8247 (took 808.6845874786377 ms)
-step 3: train loss 10.824815 (took 804.2268753051758 ms)
-step 4: train loss 10.825045 (took 806.4939975738525 ms)
+step 0: train loss 10.824956 (took 1237.299919128418 ms)
+  forward 492.27118492126465 ms, attention 138.53859901428223 ms; backward 662.6911163330078 ms, attention 235.76760292053223 ms; cuBLAS in both 312.0739459991455 ms
+step 1: train loss 10.82474 (took 1001.0159015655518 ms)
+  forward 360.54468154907227 ms, attention 128.1757354736328 ms; backward 597.4225997924805 ms, attention 226.1373996734619 ms; cuBLAS in both 219.79427337646484 ms
+step 2: train loss 10.824699 (took 990.757942199707 ms)
+  forward 349.3616580963135 ms, attention 128.77130508422852 ms; backward 598.5159873962402 ms, attention 226.6864776611328 ms; cuBLAS in both 219.50745582580566 ms
+step 3: train loss 10.824813 (took 994.7495460510254 ms)
+  forward 363.4836673736572 ms, attention 129.7292709350586 ms; backward 588.3936882019043 ms, attention 224.63345527648926 ms; cuBLAS in both 215.04902839660645 ms
+step 4: train loss 10.825045 (took 1004.2812824249268 ms)
+  forward 363.67034912109375 ms, attention 129.1642189025879 ms; backward 597.5754261016846 ms, attention 226.45998001098633 ms; cuBLAS in both 219.31862831115723 ms
 
 [Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
   Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
   Declare the space `managed: explicit` and the compiler will require the transfer home, or keep the operands in a space the host can read.
-shim: cuBLAS math mode TF32

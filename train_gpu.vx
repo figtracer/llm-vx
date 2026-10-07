@@ -5,7 +5,8 @@
 //
 // Mode 0 checks one forward and backward pass and ten AdamW steps against a
 // reference, as test_gpt2.vx does. Mode 1 trains, as train.vx does. Mode 2 runs
-// five training steps only, for memory and speed measurements.
+// five training steps only, for memory and speed measurements, and mode 3 does
+// the same and also prints where each step's time goes.
 //
 // Shapes must be compile-time constants that Vx can match by name, so each
 // extent is its own generic parameter: C3 = 3C, C4 = 4C, BT = B*T,
@@ -23,10 +24,10 @@ extern "C" {
   fn fabsf(x : f32) -> f32;
 }
 
-// The time now. In mode 2 it waits for the GPU first, so the times between
+// The time now. In mode 3 it waits for the GPU first, so the times between
 // calls split a step into phases; in the other modes it does not wait.
 fn phase_time(mode : i32) -> f64 {
-  if mode == 2 { unsafe { vx_synchronize(); } }
+  if mode == 3 { unsafe { vx_synchronize(); } }
   return unix_timestamp();
 }
 
@@ -432,7 +433,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
   let gen : *mut i32 = gen_tokens.as_mut_ptr();
 
   let mut last_step = 40;
-  if mode == 2 { last_step = 4; }
+  if mode >= 2 { last_step = 4; }
   if mode == 0 {
     last_step = 9;
     if !map_file(state_path, &mut state_file) || !map_file(losses_path, &mut losses_file) {
@@ -879,7 +880,7 @@ fn run<const L : i32, const NH : i32, const C : i32, const C3 : i32, const C4 : 
       } else {
         print!("step "); print(step); print!(": train loss "); print(mean_loss);
         print!(" (took "); print(elapsed_ms); print!(" ms)\n");
-        if mode == 2 {
+        if mode == 3 {
           print!("  forward "); print(t_fwd * 1000.0); print!(" ms, attention "); print(t_attn_fwd * 1000.0);
           print!(" ms; backward "); print(t_bwd * 1000.0); print!(" ms, attention "); print(t_attn_bwd * 1000.0);
           print!(" ms; cuBLAS in both "); print(t_mm * 1000.0); print!(" ms\n");
