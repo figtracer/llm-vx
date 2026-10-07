@@ -16,7 +16,8 @@ it lives, so the compiler can also check that a whole training step fits in GPU 
 ## Highlights
 
 - Matches llm.c bit for bit on the CPU: every logit, gradient and loss.
-- Matches llm.c on an L4 and an H100, to every printed digit of the losses.
+- Matches llm.c on NVIDIA GPUs: losses within a millionth, gradients within 2e-8.
+- Within 6% of llm.c's own CUDA trainer on an L4 (TF32), with attention on cuBLAS as llm.c does.
 - The compiler's memory check is exact: on an H100 it admits batch 17 and rejects 18, and the card
   agrees.
 

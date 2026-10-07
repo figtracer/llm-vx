@@ -1,0 +1,7 @@
+AW=4 EW=2: 598.3 ms
+AW=8 EW=2: 609.6 ms
+AW=16 EW=2: 623.0 ms
+AW=32 EW=2: 644.6 ms
+AW=64 EW=2: 628.5 ms
+AW=8 EW=4: 627.4 ms
+fastest: AW=4 EW=2

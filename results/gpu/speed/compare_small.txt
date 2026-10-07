@@ -1,0 +1,4 @@
+val loss: 5 values, largest difference 0.000001, within 0.001
+train loss: 41 values, largest difference 0.000001, within 0.001
+samples: 2 blocks, identical
+overall okay: 1

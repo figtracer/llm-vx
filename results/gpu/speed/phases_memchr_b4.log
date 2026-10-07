@@ -1,0 +1,33 @@
+Warning[W1001] at 303:3: Unused variable 'd_ln1_mean'
+  help: prefix with underscore to suppress -- replace with `_d_ln1_mean`
+Warning[W1001] at 305:3: Unused variable 'd_ln1_rstd'
+  help: prefix with underscore to suppress -- replace with `_d_ln1_rstd`
+Warning[W1001] at 321:3: Unused variable 'd_ln2_mean'
+  help: prefix with underscore to suppress -- replace with `_d_ln2_mean`
+Warning[W1001] at 323:3: Unused variable 'd_ln2_rstd'
+  help: prefix with underscore to suppress -- replace with `_d_ln2_rstd`
+Warning[W1001] at 341:3: Unused variable 'd_probs'
+  help: prefix with underscore to suppress -- replace with `_d_probs`
+[flat-codegen] emitted module via the flat path
+LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is not a file.
+
+[JIT] Translating to LLVM IR...
+[JIT] Optimizing LLVM IR (-O3)...
+[JIT] Compiling to native object (-O3)...
+[JIT] Linking native executable...
+[JIT] Executing native binary...
+[GPT-2 on GPU, train]
+step 0: train loss 10.82496 (took 674.3042469024658 ms)
+  forward 303.97605895996094 ms, attention 62.84976005554199 ms; backward 326.5852928161621 ms, attention 80.64436912536621 ms; cuBLAS in both 346.1024761199951 ms
+step 1: train loss 10.8247385 (took 503.70073318481445 ms)
+  forward 184.45849418640137 ms, attention 55.2983283996582 ms; backward 303.6797046661377 ms, attention 79.0243148803711 ms; cuBLAS in both 259.98711585998535 ms
+step 2: train loss 10.8247 (took 511.5525722503662 ms)
+  forward 187.43634223937988 ms, attention 56.160926818847656 ms; backward 308.7015151977539 ms, attention 80.10077476501465 ms; cuBLAS in both 262.6054286956787 ms
+step 3: train loss 10.824817 (took 515.0525569915771 ms)
+  forward 190.36412239074707 ms, attention 56.43606185913086 ms; backward 309.30495262145996 ms, attention 79.26750183105469 ms; cuBLAS in both 267.7130699157715 ms
+step 4: train loss 10.825046 (took 513.9920711517334 ms)
+  forward 189.15271759033203 ms, attention 56.36882781982422 ms; backward 309.39364433288574 ms, attention 79.85496520996094 ms; cuBLAS in both 265.8517360687256 ms
+
+[Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
+  Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
+  Declare the space `managed: explicit` and the compiler will require the transfer home, or keep the operands in a space the host can read.

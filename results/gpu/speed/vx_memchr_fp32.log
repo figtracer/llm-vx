@@ -1,0 +1,28 @@
+Warning[W1001] at 303:3: Unused variable 'd_ln1_mean'
+  help: prefix with underscore to suppress -- replace with `_d_ln1_mean`
+Warning[W1001] at 305:3: Unused variable 'd_ln1_rstd'
+  help: prefix with underscore to suppress -- replace with `_d_ln1_rstd`
+Warning[W1001] at 321:3: Unused variable 'd_ln2_mean'
+  help: prefix with underscore to suppress -- replace with `_d_ln2_mean`
+Warning[W1001] at 323:3: Unused variable 'd_ln2_rstd'
+  help: prefix with underscore to suppress -- replace with `_d_ln2_rstd`
+Warning[W1001] at 341:3: Unused variable 'd_probs'
+  help: prefix with underscore to suppress -- replace with `_d_probs`
+[flat-codegen] emitted module via the flat path
+LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is not a file.
+
+[JIT] Translating to LLVM IR...
+[JIT] Optimizing LLVM IR (-O3)...
+[JIT] Compiling to native object (-O3)...
+[JIT] Linking native executable...
+[JIT] Executing native binary...
+[GPT-2 on GPU, train]
+step 0: train loss 10.82496 (took 675.790548324585 ms)
+step 1: train loss 10.8247385 (took 496.1438179016113 ms)
+step 2: train loss 10.8247 (took 513.0965709686279 ms)
+step 3: train loss 10.824817 (took 506.90507888793945 ms)
+step 4: train loss 10.825046 (took 512.1383666992188 ms)
+
+[Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
+  Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
+  Declare the space `managed: explicit` and the compiler will require the transfer home, or keep the operands in a space the host can read.
