@@ -82,9 +82,12 @@ Where a step goes now ([`l4_b4_phases.log`](../results/gpu/l4_b4_phases.log),
 
 Most of the remaining kernel time is attention: each thread walks its own row of the T×T matrices,
 so its accesses do not coalesce, and Vx has no shared memory tiles or vector loads to do better.
-The per-launch overhead is most likely Vx's runtime: each launch searches the kernel's payload,
-which holds the whole module's PTX (about 300 KB), byte by byte for two fields that are not there.
-That would account for the 0.58 ms per launch, but it is not yet measured with a fixed runtime.
+Most of the per-launch overhead is Vx's runtime: each launch searches the kernel's payload, which
+holds the whole module's PTX (about 374 KB), byte by byte for two fields that are not there. With
+Vx rebuilt to search with `memchr` ([Vx#1331](https://github.com/vx-lang/Vx/issues/1331),
+`gpu-support/vx-patches/payload-field-memchr.patch`), a step takes 0.84 s instead of 0.95 s, with
+the same losses, and the time outside kernels and cuBLAS falls from about 212 ms to 94 ms
+([`l4_b4_vx_memchr.log`](../results/gpu/l4_b4_vx_memchr.log)).
 
 Vx's checker counts the peak of live tensors. In these versions a few small buffers that nothing
 reads, 0.87 MB at B=4, are no longer live at the peak, so `make admit` prints slightly lower byte
