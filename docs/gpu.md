@@ -16,15 +16,27 @@ it or refuses it with `E6010`.
 
 - **One thread per row.** Vx runs a `spawn` loop in parallel only when every write's first index is
   the loop variable. So each tensor is 2-D (rows, columns) in llm.c's memory order, and each of the
-  53 kernels computes one row per GPU thread. A kernel that updates one layer covers the whole
+  41 kernels computes one row per GPU thread. A kernel that updates one layer covers the whole
   tensor and skips the other rows.
+- **32-wide tensors.** `fch`, `fch_gelu`, `logits`, `probs` and their gradients are declared with
+  32 columns instead of a row's width: the same bytes in the same order, so cuBLAS does not notice,
+  and the elementwise kernels on them get 32 elements per thread instead of a whole row.
+- **Attention.** One thread per (batch, head, position), with the head's 64 query, dout or output
+  values held in registers across a row of the attention matrix. Vx has no local arrays, so
+  `gpu-support/gen_attention.py` writes these kernels to `attention.vx`, unrolled. Where a kernel
+  needs a row per position, it writes per head into a buffer that is dead at that point
+  (`preatt`, `datt`) and a second kernel gathers the heads.
 - **cuBLAS for matrix multiplies**, as llm.c's fp32 CUDA version does.
 - **No atomics in Vx**, so attention backward gathers instead of scattering.
+- **Unused buffers as scratch.** llm.c's layout has gradients that nothing reads here. `d_losses`
+  holds the column of ones that bias addition multiplies by, and `d_lnf_mean`, `d_lnf_rstd` hold
+  each row's softmax max and sum. The memory Vx counts stays llm.c's.
 - **Generated entry point.** `train_gpu.vx` is generated from `gpu-support/train_gpu.tmpl` by
   `gpu-support/gen_train_gpu.py`; `gpu-support/entry.py` writes a `main` for one model size and
   batch.
-- **Three modes.** 0 checks against llm.c's reference (`ref/test_gpu_small.vx`), 1 trains like
-  llm.c (`ref/train_gpu_small.vx`), 2 runs five steps and prints where the time goes.
+- **Four modes.** 0 checks against llm.c's reference (`ref/test_gpu_small.vx`), 1 trains like
+  llm.c (`ref/train_gpu_small.vx`), 2 times five steps, and 3 also prints where the time goes.
+  `gpu-support/kernel_times.py` splits a `VX_TIME_KERNEL=1` run's device time by Vx function.
 
 Without the CUDA plugin (any Mac), Vx runs the kernels on the CPU, so `make gpu-test` and
 `make gpu-train-check` work anywhere.
