@@ -1,12 +1,17 @@
-// GPT-2 kernels for the GPU, ported from gpt2.vx. Matrix multiplications go
-// to cuBLAS, as in llm.c's train_gpt2_fp32.cu. Every other kernel is a Vx
+// GPT-2 kernels for the GPU. Matrix multiplications go to cuBLAS, as in
+// llm.c's train_gpt2_fp32.cu: the dense layers, attention's products QK^T and
+// att V and their gradients, and also the bias gradients and residual
+// additions, which cuBLAS does without a Vx launch. Every other kernel is a Vx
 // `spawn` block.
 //
 // Vx runs a `spawn` loop in parallel only when each write's first index is the
 // loop variable. So every tensor here is 2-D (rows, columns) in llm.c's memory
 // order, each kernel loops over the rows of the tensor it writes (one GPU
 // thread per row), and a kernel that updates one layer covers the whole tensor
-// and skips the rows outside [lo, lo + n). Reads may use any index.
+// and skips the rows outside [lo, lo + n). Reads may use any index. Vx launches
+// at most 4096 blocks of 128 threads and strides the rest, and the threads of a
+// warp take consecutive rows, so a kernel reads memory in one go when its
+// threads read consecutive elements.
 //
 // Kernels run on the built-in `Topology::GPU` and data lives in `Memory::GPU_HBM`.
 // Vx's CUDA runtime sends only built-in GPU topologies to a device; a topology
@@ -20,6 +25,16 @@ extern "C" {
                     alpha : *mut f32, A : *mut f32 in Memory::GPU_HBM, lda : i32,
                     B : *mut f32 in Memory::GPU_HBM, ldb : i32, beta : *mut f32,
                     C : *mut f32 in Memory::GPU_HBM, ldc : i32) -> i32;
+  fn cublasSgemmStridedBatched(handle : *mut i8, transa : i32, transb : i32, m : i32, n : i32, k : i32,
+                               alpha : *mut f32, A : *mut f32 in Memory::GPU_HBM, lda : i32, strideA : i64,
+                               B : *mut f32 in Memory::GPU_HBM, ldb : i32, strideB : i64, beta : *mut f32,
+                               C : *mut f32 in Memory::GPU_HBM, ldc : i32, strideC : i64, batchCount : i32) -> i32;
+  fn cublasSgemv_v2(handle : *mut i8, trans : i32, m : i32, n : i32, alpha : *mut f32,
+                    A : *mut f32 in Memory::GPU_HBM, lda : i32, x : *mut f32 in Memory::GPU_HBM, incx : i32,
+                    beta : *mut f32, y : *mut f32 in Memory::GPU_HBM, incy : i32) -> i32;
+  fn cublasSgeam(handle : *mut i8, transa : i32, transb : i32, m : i32, n : i32, alpha : *mut f32,
+                 A : *mut f32 in Memory::GPU_HBM, lda : i32, beta : *mut f32, B : *mut f32 in Memory::GPU_HBM,
+                 ldb : i32, C : *mut f32 in Memory::GPU_HBM, ldc : i32) -> i32;
   // From gpu/shim.c: the cuBLAS handle, device pointer offsets (Vx has no
   // pointer arithmetic) and copies between host and device memory.
   fn vx_cublas() -> *mut i8;
@@ -32,15 +47,47 @@ extern "C" {
   fn powf(x : f32, y : f32) -> f32;
 }
 
+// e^x and tanh in f32 arithmetic that a GPU runs fast. Vx's `.exp()` and
+// `.tanh()` are LLVM libc's correctly rounded functions written in Vx, which
+// on a GPU run in f64 with lookup tables in memory: most of a step's kernel
+// time, at first. A kernel's loop runs in parallel only if it calls nothing but
+// stdlib methods such as `round` and `powi`, so these are macros, not
+// functions. llm.c's CUDA trainer gets fast exp from --use_fast_math.
+//
+// e^x: x clamped to [-87, 88], x = f - m ln 2 with m whole and |f| <= ln(2) / 2
+// (ln 2 in two parts, so m ln 2 is exact), e^f from its Taylor series to degree
+// 6 (relative error below 2e-7), and 2^-m from `powi`, which is exact. Vx does
+// not expand a macro inside a method call's arguments, so `powi`'s argument
+// spells out exp_m!(exp_clamp!(x)).
+macro_rules exp_clamp { ($x : expr) => {
+    ($x).max(-87.0).min(88.0)
+  }; }
+macro_rules exp_m { ($x : expr) => {
+    (($x) * -1.442695).round()
+  }; }
+macro_rules exp_f { ($x : expr) => {
+    (($x) + exp_m!($x) * 0.693145751953125) + exp_m!($x) * 0.000001428606765330187
+  }; }
+macro_rules exp_poly { ($f : expr) => {
+    1.0 + ($f) * (1.0 + ($f) * (0.5 + ($f) * (0.16666667 + ($f) * (0.041666668 + ($f) * (0.008333334 + ($f) * 0.0013888889)))))
+  }; }
+macro_rules fast_exp { ($x : expr) => {
+    (exp_poly!(exp_f!(exp_clamp!($x))) * (0.5 as f32).powi(((($x).max(-87.0).min(88.0)) * -1.442695).round() as i32))
+  }; }
+// tanh(y) = 2 / (1 + e^(-2y)) - 1.
+macro_rules fast_tanh { ($y : expr) => {
+    (2.0 / (1.0 + fast_exp!(-2.0 * ($y))) - 1.0)
+  }; }
+
 // sqrt(2 / pi), rounded the way llm.c's `sqrtf(2.0f / M_PI)` rounds it.
 fn gelu_scale() -> f32 {
   return unsafe { sqrtf((2.0f64 / 3.141592653589793f64) as f32) };
 }
 
 // ----------------------------------------------------------------------------
-// Matrix multiplications, on row-major buffers.
+// cuBLAS, on row-major buffers.
 
-// out (BT, OC) = inp (BT, C) @ weight (OC, C)^T. The bias is a separate kernel.
+// out (BT, OC) = inp (BT, C) @ weight (OC, C)^T. The bias is a separate call.
 fn cublas_matmul_forward(out : *mut f32 in Memory::GPU_HBM, inp : *mut f32 in Memory::GPU_HBM,
                   weight : *mut f32 in Memory::GPU_HBM, BT : i32, C : i32, OC : i32) -> void {
   let mut one : f32 = 1.0;
@@ -64,14 +111,14 @@ fn cublas_add_bias(out : *mut f32 in Memory::GPU_HBM, bias : *mut f32 in Memory:
   }
 }
 
-// dinp (BT, C) += dout (BT, OC) @ weight (OC, C) and dweight (OC, C) += dout^T @ inp.
+// dinp (BT, C) = dout (BT, OC) @ weight (OC, C) and dweight (OC, C) += dout^T @ inp.
+// dinp is set, as in llm.c's CUDA version: nothing else writes it.
 fn cublas_matmul_backward(dinp : *mut f32 in Memory::GPU_HBM, dweight : *mut f32 in Memory::GPU_HBM,
                    dout : *mut f32 in Memory::GPU_HBM, inp : *mut f32 in Memory::GPU_HBM,
                    weight : *mut f32 in Memory::GPU_HBM, BT : i32, C : i32, OC : i32) -> void {
-  // alpha and beta are both 1: accumulate, as the CPU kernels do. Vx allows one
-  // mutable borrow per local, so each argument gets its own.
+  // Vx allows one mutable borrow per local, so each argument gets its own.
   let mut alpha1 : f32 = 1.0;
-  let mut beta1 : f32 = 1.0;
+  let mut beta1 : f32 = 0.0;
   let mut alpha2 : f32 = 1.0;
   let mut beta2 : f32 = 1.0;
   unsafe {
@@ -79,6 +126,50 @@ fn cublas_matmul_backward(dinp : *mut f32 in Memory::GPU_HBM, dweight : *mut f32
                    (&mut beta1) as *mut f32, dinp, C);
     cublasSgemm_v2(vx_cublas(), 0, 1, C, OC, BT, (&mut alpha2) as *mut f32, inp, C, dout, OC,
                    (&mut beta2) as *mut f32, dweight, C);
+  }
+}
+
+// dbias (OC) += the column sums of dout (BT, OC): dout^T times a column of ones.
+fn cublas_bias_backward(dbias : *mut f32 in Memory::GPU_HBM, dout : *mut f32 in Memory::GPU_HBM,
+                        ones : *mut f32 in Memory::GPU_HBM, BT : i32, OC : i32) -> void {
+  let mut one : f32 = 1.0;
+  let mut beta : f32 = 1.0;
+  unsafe {
+    cublasSgemv_v2(vx_cublas(), 0, OC, BT, (&mut one) as *mut f32, dout, OC, ones, 1,
+                   (&mut beta) as *mut f32, dbias, 1);
+  }
+}
+
+// out = a + b, (rows, cols) each, for the residual connections. out may be a:
+// cuBLAS adds in place when the leading dimensions match.
+fn cublas_add(out : *mut f32 in Memory::GPU_HBM, a : *mut f32 in Memory::GPU_HBM, b : *mut f32 in Memory::GPU_HBM,
+              rows : i32, cols : i32) -> void {
+  let mut one : f32 = 1.0;
+  let mut beta : f32 = 1.0;
+  unsafe {
+    cublasSgeam(vx_cublas(), 0, 0, cols, rows, (&mut one) as *mut f32, a, cols, (&mut beta) as *mut f32, b, cols,
+                out, cols);
+  }
+}
+
+// One product per (batch, head): C_bh = alpha * op(A_bh) op(B_bh), column-major,
+// for heads strided by sa, sb, sc within a batch and batches by ab, bb, cb.
+// llm.c first copies q, k and v into a (B, NH, T, hs) buffer so one call covers
+// every head of every batch. Here the leading dimensions reach each head where
+// it lies in qkv and atty, so nothing is copied, at one call per batch.
+fn cublas_heads(transa : i32, transb : i32, m : i32, n : i32, k : i32, alpha : f32,
+                A : *mut f32 in Memory::GPU_HBM, lda : i32, sa : i64, ab : i64,
+                Bm : *mut f32 in Memory::GPU_HBM, ldb : i32, sb : i64, bb : i64,
+                Cm : *mut f32 in Memory::GPU_HBM, ldc : i32, sc : i64, cb : i64, heads : i32, batches : i32) -> void {
+  for b in 0..batches {
+    let b64 = b as i64;
+    let mut a1 : f32 = alpha;
+    let mut zero : f32 = 0.0;
+    unsafe {
+      cublasSgemmStridedBatched(vx_cublas(), transa, transb, m, n, k, (&mut a1) as *mut f32,
+                                vx_dev_at(A, b64 * ab), lda, sa, vx_dev_at(Bm, b64 * bb), ldb, sb,
+                                (&mut zero) as *mut f32, vx_dev_at(Cm, b64 * cb), ldc, sc, heads);
+    }
   }
 }
 
@@ -95,15 +186,17 @@ fn k_fill<const R : i32, const C : i32>(t : &mut Tensor<f32, [R, C], Memory::GPU
   return;
 }
 
-fn k_encoder_forward<const BT : i32, const C : i32, const VP : i32, const MAXT : i32>(
+// wte and wpe are EW wide: row ix of the embedding starts at tensor row ix * C / EW.
+fn k_encoder_forward<const BT : i32, const C : i32, const RE : i32, const RP : i32, const EW : i32>(
     out : &mut Tensor<f32, [BT, C], Memory::GPU_HBM>, inp : &Tensor<i32, [BT, 1], Memory::GPU_HBM>,
-    wte : &Tensor<f32, [VP, C], Memory::GPU_HBM>, wpe : &Tensor<f32, [MAXT, C], Memory::GPU_HBM>,
+    wte : &Tensor<f32, [RE, EW], Memory::GPU_HBM>, wpe : &Tensor<f32, [RP, EW], Memory::GPU_HBM>,
     T : i32) -> void {
+  let per_row = C / EW;
   spawn on(Topology::GPU) {
     for r in 0..BT {
-      let ix = inp[r][0];
-      let t = r % T;
-      for i in 0..C { out[r][i] = wte[ix][i] + wpe[t][i]; }
+      let e0 = inp[r][0] * per_row;
+      let p0 = (r % T) * per_row;
+      for i in 0..C { out[r][i] = wte[e0 + i / EW][i % EW] + wpe[p0 + i / EW][i % EW]; }
     }
   }
   return;
@@ -142,21 +235,96 @@ fn k_layernorm_forward<const R : i32, const RI : i32, const C : i32, const RW : 
   return;
 }
 
-// out = the attention output, for rows [lo, lo + n) of out: each position
-// collects its heads from `scratch`.
-fn k_attention_out_gather<const R : i32, const C : i32, const RA : i32, const T : i32>(
-    out : &mut Tensor<f32, [R, C], Memory::GPU_HBM>, scratch : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
-    NH : i32, BT : i32, l : i32, lo : i32, n : i32) -> void {
-  let hs = C / NH;
+// The attention matrices (preatt, att and their gradients) are (B, NH, T, T)
+// per layer, stored AW elements per tensor row; a layer's rows start at lo.
+// Element e of a layer is row lo + e / AW, column e % AW, and belongs to
+// attention row q = e / T (one batch, head and query position t = q % T) at
+// key position e % T. Only keys at or before t count.
+
+// Partial softmax statistics for one layer's scores: P partials per attention
+// row, partial p over keys p, p + P, p + 2P, ... up to t, so the threads of a
+// warp read consecutive keys. Each writes its max and its sum of exp(x - max),
+// both kept in one pass (the online softmax), to row lo + j of `partials`.
+fn k_att_partials<const RW : i32, const AW : i32>(partials : &mut Tensor<f32, [RW, AW], Memory::GPU_HBM>,
+    preatt : &Tensor<f32, [RW, AW], Memory::GPU_HBM>, T : i32, P : i32, lo : i32, n : i32) -> void {
   spawn on(Topology::GPU) {
-    for r in 0..R {
-      if r >= lo && r < lo + n {
-        let rr = r - lo;
-        let b = rr / T;
-        let t = rr % T;
-        for h in 0..NH {
-          let a = l * BT * NH + b * NH * T + h * T + t;
-          for i in 0..hs { out[r][h * hs + i] = scratch[a][i]; }
+    for k in 0..RW {
+      if k >= lo && k < lo + n {
+        let j = k - lo;
+        let q = j / P;
+        let p = j % P;
+        let t = q % T;
+        let base = q * T;
+        let mut maxval : f32 = -10000.0;
+        let mut sum : f32 = 0.0;
+        for s in 0..(T / P) {
+          let col = p + s * P;
+          if col <= t {
+            let e = base + col;
+            let x = preatt[lo + e / AW][e % AW];
+            if x > maxval {
+              sum = sum * fast_exp!(maxval - x) + 1.0;
+              maxval = x;
+            } else {
+              sum = sum + fast_exp!(x - maxval);
+            }
+          }
+        }
+        partials[k][0] = maxval;
+        partials[k][1] = sum;
+      }
+    }
+  }
+  return;
+}
+
+// Each attention row's max and 1 / sum, from its P partials, into columns 2
+// and 3 of the row of its first partial. One thread per attention row.
+fn k_att_row_stats<const RW : i32, const AW : i32>(partials : &mut Tensor<f32, [RW, AW], Memory::GPU_HBM>,
+    P : i32, lo : i32, n : i32) -> void {
+  spawn on(Topology::GPU) {
+    for k in 0..RW {
+      if k >= lo && k < lo + n && (k - lo) % P == 0 {
+        let mut maxval : f32 = -10000.0;
+        for p in 0..P {
+          let m = partials[k + p][0];
+          if m > maxval { maxval = m; }
+        }
+        let mut sum : f32 = 0.0;
+        for p in 0..P { sum = sum + partials[k + p][1] * fast_exp!(partials[k + p][0] - maxval); }
+        partials[k][2] = maxval;
+        partials[k][3] = 1.0 / sum;
+      }
+    }
+  }
+  return;
+}
+
+// att = softmax(preatt) over the keys at or before each position, AW elements
+// per thread, with the row's statistics from k_att_row_stats. Entries after
+// the position are 0, written where a thread's elements straddle the diagonal
+// and zeroed once at the start elsewhere.
+fn k_att_softmax<const RW : i32, const AW : i32>(att : &mut Tensor<f32, [RW, AW], Memory::GPU_HBM>,
+    preatt : &Tensor<f32, [RW, AW], Memory::GPU_HBM>, partials : &Tensor<f32, [RW, AW], Memory::GPU_HBM>,
+    T : i32, P : i32, lo : i32, n : i32) -> void {
+  spawn on(Topology::GPU) {
+    for k in 0..RW {
+      if k >= lo && k < lo + n {
+        let e0 = (k - lo) * AW;
+        let q = e0 / T;
+        let t = q % T;
+        let c0 = e0 % T;
+        if c0 <= t {
+          let pr = lo + q * P;
+          let maxval = partials[pr][2];
+          let inv = partials[pr][3];
+          for c in 0..AW {
+            if c0 + c <= t {
+              att[k][c] = fast_exp!(preatt[k][c] - maxval) * inv;
+            } else {
+              att[k][c] = 0.0;
+            }
+          }
         }
       }
     }
@@ -164,28 +332,53 @@ fn k_attention_out_gather<const R : i32, const C : i32, const RA : i32, const T 
   return;
 }
 
-// out = a + b, row by row: rows [lo, lo + n) of out, from [a_lo, ..) and [b_lo, ..).
-fn k_add<const R : i32, const C : i32, const RA : i32, const RB : i32>(
-    out : &mut Tensor<f32, [R, C], Memory::GPU_HBM>, a : &Tensor<f32, [RA, C], Memory::GPU_HBM>,
-    b : &Tensor<f32, [RB, C], Memory::GPU_HBM>, a_lo : i32, b_lo : i32, lo : i32, n : i32) -> void {
+// For each (batch, head, position) of one layer, dout . out over the head's hs
+// components, into row lo + q of `dots`. It equals the sum over keys of
+// att * datt, because out = att V and datt = dout V^T, and costs hs
+// multiply-adds instead of a pass over the row (FlashAttention's trick).
+fn k_att_dots<const RW : i32, const AW : i32, const R : i32, const C : i32>(
+    dots : &mut Tensor<f32, [RW, AW], Memory::GPU_HBM>, dout : &Tensor<f32, [R, C], Memory::GPU_HBM>,
+    out : &Tensor<f32, [R, C], Memory::GPU_HBM>, NH : i32, T : i32, row0 : i32, lo : i32, n : i32) -> void {
+  let hs = C / NH;
   spawn on(Topology::GPU) {
-    for r in 0..R {
-      if r >= lo && r < lo + n {
-        for c in 0..C { out[r][c] = a[a_lo + r - lo][c] + b[b_lo + r - lo][c]; }
+    for k in 0..RW {
+      if k >= lo && k < lo + n {
+        let q = k - lo;
+        let b = q / (NH * T);
+        let h = (q / T) % NH;
+        let r = row0 + b * T + q % T;
+        let mut dot : f32 = 0.0;
+        for i in 0..hs { dot = dot + dout[r][h * hs + i] * out[r][h * hs + i]; }
+        dots[k][0] = dot;
       }
     }
   }
   return;
 }
 
-// dst += src, row by row: rows [lo, lo + n) of dst, from [src_lo, ..) of src.
-fn k_accumulate<const R : i32, const C : i32, const RS : i32>(
-    dst : &mut Tensor<f32, [R, C], Memory::GPU_HBM>, src : &Tensor<f32, [RS, C], Memory::GPU_HBM>,
-    src_lo : i32, lo : i32, n : i32) -> void {
+// dpreatt = scale * att * (datt - dot), as llm.c's CUDA version computes the
+// softmax backward, with the scale of QK^T folded in.
+fn k_att_softmax_backward<const RW : i32, const AW : i32>(dpreatt : &mut Tensor<f32, [RW, AW], Memory::GPU_HBM>,
+    att : &Tensor<f32, [RW, AW], Memory::GPU_HBM>, datt : &Tensor<f32, [RW, AW], Memory::GPU_HBM>,
+    dots : &Tensor<f32, [RW, AW], Memory::GPU_HBM>, T : i32, scale : f32, lo : i32, n : i32) -> void {
   spawn on(Topology::GPU) {
-    for r in 0..R {
-      if r >= lo && r < lo + n {
-        for c in 0..C { dst[r][c] = dst[r][c] + src[src_lo + r - lo][c]; }
+    for k in 0..RW {
+      if k >= lo && k < lo + n {
+        let e0 = (k - lo) * AW;
+        let q = e0 / T;
+        let t = q % T;
+        let c0 = e0 % T;
+        if c0 <= t {
+          let dot = dots[lo + q][0];
+          for c in 0..AW {
+            if c0 + c <= t {
+              let acc = att[k][c] * (datt[k][c] - dot);
+              dpreatt[k][c] = scale * acc;
+            } else {
+              dpreatt[k][c] = 0.0;
+            }
+          }
+        }
       }
     }
   }
@@ -200,7 +393,7 @@ fn k_gelu_forward<const R : i32, const C : i32>(out : &mut Tensor<f32, [R, C], M
         for c in 0..C {
           let x = inp[r][c];
           let cube = 0.044715 * x * x * x;
-          out[r][c] = 0.5 * x * (1.0 + (s * (x + cube)).tanh());
+          out[r][c] = 0.5 * x * (1.0 + fast_tanh!(s * (x + cube)));
         }
       }
     }
@@ -208,25 +401,54 @@ fn k_gelu_forward<const R : i32, const C : i32>(out : &mut Tensor<f32, [R, C], M
   return;
 }
 
-// Each row's max and sum of exp(x - max) over its V real columns, for the
-// softmax. logits is 32 wide: row r is view rows r * VP / 32 onwards. One thread
-// per row, summing in column order as llm.c does.
-fn k_softmax_stats<const RW : i32, const BT : i32>(maxes : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>,
-    sums : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>, logits : &Tensor<f32, [RW, 32], Memory::GPU_HBM>,
-    V : i32, VP : i32) -> void {
-  let per_row = VP / 32;
+// The logits are (BT, VP), EW elements per tensor row. Partial softmax
+// statistics, PL per row: partial p over columns p, p + PL, ... below V, so the
+// threads of a warp read consecutive columns, in one pass as in k_att_partials.
+// Partial j = r * PL + p goes to row j of `partials`.
+fn k_logits_partials<const RW : i32, const EW : i32>(partials : &mut Tensor<f32, [RW, EW], Memory::GPU_HBM>,
+    logits : &Tensor<f32, [RW, EW], Memory::GPU_HBM>, V : i32, VP : i32, PL : i32, n : i32) -> void {
+  let per_row = VP / EW;
+  spawn on(Topology::GPU) {
+    for k in 0..RW {
+      if k < n {
+        let row0 = (k / PL) * per_row;
+        let p = k % PL;
+        let mut maxval : f32 = -10000.0;
+        let mut sum : f32 = 0.0;
+        for s in 0..(VP / PL) {
+          let col = p + s * PL;
+          if col < V {
+            let x = logits[row0 + col / EW][col % EW];
+            if x > maxval {
+              sum = sum * fast_exp!(maxval - x) + 1.0;
+              maxval = x;
+            } else {
+              sum = sum + fast_exp!(x - maxval);
+            }
+          }
+        }
+        partials[k][0] = maxval;
+        partials[k][1] = sum;
+      }
+    }
+  }
+  return;
+}
+
+// Each row's max and sum of exp(x - max), from its PL partials.
+fn k_logits_stats<const BT : i32, const RW : i32, const EW : i32>(maxes : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>,
+    sums : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>, partials : &Tensor<f32, [RW, EW], Memory::GPU_HBM>,
+    PL : i32) -> void {
   spawn on(Topology::GPU) {
     for r in 0..BT {
-      let row0 = r * per_row;
+      let pr = r * PL;
       let mut maxval : f32 = -10000.0;
-      for i in 0..V {
-        let x = logits[row0 + i / 32][i % 32];
-        if x > maxval { maxval = x; }
+      for p in 0..PL {
+        let m = partials[pr + p][0];
+        if m > maxval { maxval = m; }
       }
       let mut sum : f32 = 0.0;
-      for i in 0..V {
-        sum = sum + (logits[row0 + i / 32][i % 32] - maxval).exp();
-      }
+      for p in 0..PL { sum = sum + partials[pr + p][1] * fast_exp!(partials[pr + p][0] - maxval); }
       maxes[r][0] = maxval;
       sums[r][0] = sum;
     }
@@ -234,23 +456,23 @@ fn k_softmax_stats<const RW : i32, const BT : i32>(maxes : &mut Tensor<f32, [BT,
   return;
 }
 
-// probs = exp(logits - max) / sum, 32 elements per thread, and 0 in the padded
-// columns from V on.
-fn k_softmax_forward<const RW : i32, const BT : i32>(probs : &mut Tensor<f32, [RW, 32], Memory::GPU_HBM>,
-    logits : &Tensor<f32, [RW, 32], Memory::GPU_HBM>, maxes : &Tensor<f32, [BT, 1], Memory::GPU_HBM>,
+// probs = exp(logits - max) / sum, and 0 in the padded columns from V on. Only
+// generation needs probs: the loss and its gradient come from the logits.
+fn k_softmax_forward<const RW : i32, const BT : i32, const EW : i32>(probs : &mut Tensor<f32, [RW, EW], Memory::GPU_HBM>,
+    logits : &Tensor<f32, [RW, EW], Memory::GPU_HBM>, maxes : &Tensor<f32, [BT, 1], Memory::GPU_HBM>,
     sums : &Tensor<f32, [BT, 1], Memory::GPU_HBM>, V : i32, VP : i32) -> void {
-  let per_row = VP / 32;
+  let per_row = VP / EW;
   spawn on(Topology::GPU) {
-    for r in 0..RW {
-      let row = r / per_row;
-      let c0 = (r % per_row) * 32;
+    for k in 0..RW {
+      let row = k / per_row;
+      let c0 = (k % per_row) * EW;
       let maxval = maxes[row][0];
       let sum = sums[row][0];
-      for c in 0..32 {
+      for c in 0..EW {
         if c0 + c < V {
-          probs[r][c] = (logits[r][c] - maxval).exp() / sum;
+          probs[k][c] = fast_exp!(logits[k][c] - maxval) / sum;
         } else {
-          probs[r][c] = 0.0;
+          probs[k][c] = 0.0;
         }
       }
     }
@@ -258,74 +480,48 @@ fn k_softmax_forward<const RW : i32, const BT : i32>(probs : &mut Tensor<f32, [R
   return;
 }
 
-// losses = -log(probs[target]), with probs 32 wide.
-fn k_crossentropy_forward<const BT : i32, const RW : i32>(losses : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>,
-    probs : &Tensor<f32, [RW, 32], Memory::GPU_HBM>, targets : &Tensor<i32, [BT, 1], Memory::GPU_HBM>,
-    VP : i32) -> void {
-  let per_row = VP / 32;
+// losses = -log(probs[target]), with probs[target] from the logits and the
+// row's statistics.
+fn k_crossentropy_forward<const BT : i32, const RW : i32, const EW : i32>(
+    losses : &mut Tensor<f32, [BT, 1], Memory::GPU_HBM>, logits : &Tensor<f32, [RW, EW], Memory::GPU_HBM>,
+    maxes : &Tensor<f32, [BT, 1], Memory::GPU_HBM>, sums : &Tensor<f32, [BT, 1], Memory::GPU_HBM>,
+    targets : &Tensor<i32, [BT, 1], Memory::GPU_HBM>, VP : i32) -> void {
+  let per_row = VP / EW;
   spawn on(Topology::GPU) {
     for r in 0..BT {
       let ix = targets[r][0];
-      losses[r][0] = 0.0 - probs[r * per_row + ix / 32][ix % 32].ln();
+      let prob = fast_exp!(logits[r * per_row + ix / EW][ix % EW] - maxes[r][0]) / sums[r][0];
+      losses[r][0] = 0.0 - prob.ln();
     }
   }
   return;
 }
 
-// dlogits += (probs - onehot(target)) * dloss over the V real columns, on the
-// 32-wide tensors: view row r is part of row r / (VP / 32), from column
-// (r % (VP / 32)) * 32.
-fn k_crossentropy_softmax_backward<const RW : i32, const BT : i32>(
-    dlogits : &mut Tensor<f32, [RW, 32], Memory::GPU_HBM>, probs : &Tensor<f32, [RW, 32], Memory::GPU_HBM>,
+// dlogits = (probs - onehot(target)) * dloss over the V real columns and 0 in
+// the padded ones, with probs from the logits as in k_softmax_forward. Set, as
+// llm.c's CUDA version sets it: nothing else writes dlogits.
+fn k_crossentropy_softmax_backward<const RW : i32, const BT : i32, const EW : i32>(
+    dlogits : &mut Tensor<f32, [RW, EW], Memory::GPU_HBM>, logits : &Tensor<f32, [RW, EW], Memory::GPU_HBM>,
+    maxes : &Tensor<f32, [BT, 1], Memory::GPU_HBM>, sums : &Tensor<f32, [BT, 1], Memory::GPU_HBM>,
     targets : &Tensor<i32, [BT, 1], Memory::GPU_HBM>, dloss : f32, V : i32, VP : i32) -> void {
-  let per_row = VP / 32;
+  let per_row = VP / EW;
   spawn on(Topology::GPU) {
-    for r in 0..RW {
-      let ix = targets[r / per_row][0];
-      let c0 = (r % per_row) * 32;
-      for c in 0..32 {
+    for k in 0..RW {
+      let row = k / per_row;
+      let c0 = (k % per_row) * EW;
+      let ix = targets[row][0];
+      let maxval = maxes[row][0];
+      let sum = sums[row][0];
+      for c in 0..EW {
         let i = c0 + c;
         if i < V {
+          let prob = fast_exp!(logits[k][c] - maxval) / sum;
           let mut indicator : f32 = 0.0;
           if i == ix { indicator = 1.0; }
-          dlogits[r][c] = dlogits[r][c] + (probs[r][c] - indicator) * dloss;
+          dlogits[k][c] = (prob - indicator) * dloss;
+        } else {
+          dlogits[k][c] = 0.0;
         }
-      }
-    }
-  }
-  return;
-}
-
-// dbias[b_lo + o] += the column sum of dout rows [d_lo, d_lo + BT), one thread per output.
-fn k_bias_backward<const RB : i32, const R : i32, const OC : i32>(
-    dbias : &mut Tensor<f32, [RB, 1], Memory::GPU_HBM>, dout : &Tensor<f32, [R, OC], Memory::GPU_HBM>,
-    b_lo : i32, d_lo : i32, BT : i32) -> void {
-  spawn on(Topology::GPU) {
-    for r in 0..RB {
-      if r >= b_lo && r < b_lo + OC {
-        let o = r - b_lo;
-        let mut sum : f32 = 0.0;
-        for bt in 0..BT { sum = sum + dout[d_lo + bt][o]; }
-        dbias[r][0] = dbias[r][0] + sum;
-      }
-    }
-  }
-  return;
-}
-
-// k_bias_backward for a 32-wide dout: element (row, o) is at
-// [row * (OC / 32) + o / 32][o % 32], the same place in memory.
-fn k_bias_backward_wide<const RB : i32, const RW : i32>(
-    dbias : &mut Tensor<f32, [RB, 1], Memory::GPU_HBM>, dout : &Tensor<f32, [RW, 32], Memory::GPU_HBM>,
-    b_lo : i32, d_lo : i32, BT : i32, OC : i32) -> void {
-  let per_row = OC / 32;
-  spawn on(Topology::GPU) {
-    for r in 0..RB {
-      if r >= b_lo && r < b_lo + OC {
-        let o = r - b_lo;
-        let mut sum : f32 = 0.0;
-        for bt in 0..BT { sum = sum + dout[(d_lo + bt) * per_row + o / 32][o % 32]; }
-        dbias[r][0] = dbias[r][0] + sum;
       }
     }
   }
@@ -333,6 +529,7 @@ fn k_bias_backward_wide<const RB : i32, const RW : i32>(
 }
 
 // dinp rows [lo, lo + n) from rows [d_lo, ..) of dout, inp, mean and rstd.
+// dinp is set: the caller adds the residual stream's gradient with cuBLAS.
 fn k_layernorm_backward_inp<const R : i32, const C : i32, const RD : i32, const RI : i32, const RW : i32>(
     dinp : &mut Tensor<f32, [R, C], Memory::GPU_HBM>, dout : &Tensor<f32, [RD, C], Memory::GPU_HBM>,
     inp : &Tensor<f32, [RI, C], Memory::GPU_HBM>, weight : &Tensor<f32, [RW, 1], Memory::GPU_HBM>,
@@ -363,7 +560,7 @@ fn k_layernorm_backward_inp<const R : i32, const C : i32, const RD : i32, const 
           dval = dval - dnorm_mean;
           dval = dval - norm_bti * dnorm_norm_mean;
           dval = dval * rstd_bt;
-          dinp[r][i] = dinp[r][i] + dval;
+          dinp[r][i] = dval;
         }
       }
     }
@@ -371,32 +568,39 @@ fn k_layernorm_backward_inp<const R : i32, const C : i32, const RD : i32, const 
   return;
 }
 
-// dweight and dbias at [w_lo, w_lo + C): column sums over BT rows from d_lo.
-fn k_layernorm_backward_params<const RW : i32, const RD : i32, const C : i32, const RI : i32>(
+// dweight and dbias of every layer at once, after the backward pass: thread r
+// is channel r % C of layer l = r / C, and sums its column of dout over the
+// layer's BT rows, which start at l * BT. The layer's input starts at row
+// l * BT + in_off of inp, or is inp0 for the first layer when use_inp0.
+fn k_layernorm_backward_params<const RW : i32, const RD : i32, const C : i32, const RI0 : i32, const RI : i32>(
     dweight : &mut Tensor<f32, [RW, 1], Memory::GPU_HBM>, dbias : &mut Tensor<f32, [RW, 1], Memory::GPU_HBM>,
-    dout : &Tensor<f32, [RD, C], Memory::GPU_HBM>, inp : &Tensor<f32, [RI, C], Memory::GPU_HBM>,
-    mean : &Tensor<f32, [RD, 1], Memory::GPU_HBM>, rstd : &Tensor<f32, [RD, 1], Memory::GPU_HBM>,
-    w_lo : i32, d_lo : i32, in_lo : i32, BT : i32) -> void {
+    dout : &Tensor<f32, [RD, C], Memory::GPU_HBM>, inp0 : &Tensor<f32, [RI0, C], Memory::GPU_HBM>,
+    inp : &Tensor<f32, [RI, C], Memory::GPU_HBM>, mean : &Tensor<f32, [RD, 1], Memory::GPU_HBM>,
+    rstd : &Tensor<f32, [RD, 1], Memory::GPU_HBM>, use_inp0 : bool, in_off : i32, BT : i32) -> void {
   spawn on(Topology::GPU) {
     for r in 0..RW {
-      if r >= w_lo && r < w_lo + C {
-        let i = r - w_lo;
-        let mut dw : f32 = dweight[r][0];
-        let mut db : f32 = dbias[r][0];
-        for bt in 0..BT {
-          let norm_bti = (inp[in_lo + bt][i] - mean[d_lo + bt][0]) * rstd[d_lo + bt][0];
-          db = db + dout[d_lo + bt][i];
-          dw = dw + norm_bti * dout[d_lo + bt][i];
-        }
-        dweight[r][0] = dw;
-        dbias[r][0] = db;
+      let l = r / C;
+      let i = r % C;
+      let d_lo = l * BT;
+      let in_lo = d_lo + in_off;
+      let mut dw : f32 = dweight[r][0];
+      let mut db : f32 = dbias[r][0];
+      for bt in 0..BT {
+        let mut x : f32 = 0.0;
+        if use_inp0 && l == 0 { x = inp0[bt][i]; } else { x = inp[in_lo + bt][i]; }
+        let norm_bti = (x - mean[d_lo + bt][0]) * rstd[d_lo + bt][0];
+        db = db + dout[d_lo + bt][i];
+        dw = dw + norm_bti * dout[d_lo + bt][i];
       }
+      dweight[r][0] = dw;
+      dbias[r][0] = db;
     }
   }
   return;
 }
 
-// sech^2 is written as 1 - tanh^2: Vx kernels have tanh but not cosh.
+// sech^2 is written as 1 - tanh^2: Vx kernels have tanh but not cosh. dinp is
+// set: nothing else writes it.
 fn k_gelu_backward<const R : i32, const C : i32>(dinp : &mut Tensor<f32, [R, C], Memory::GPU_HBM>,
     inp : &Tensor<f32, [R, C], Memory::GPU_HBM>, dout : &Tensor<f32, [R, C], Memory::GPU_HBM>, s : f32,
     lo : i32, n : i32) -> void {
@@ -406,34 +610,10 @@ fn k_gelu_backward<const R : i32, const C : i32>(dinp : &mut Tensor<f32, [R, C],
         for c in 0..C {
           let x = inp[r][c];
           let cube = 0.044715 * x * x * x;
-          let tanh_out = (s * (x + cube)).tanh();
+          let tanh_out = fast_tanh!(s * (x + cube));
           let sech_out = 1.0 - tanh_out * tanh_out;
           let local_grad = 0.5 * (1.0 + tanh_out) + x * 0.5 * sech_out * s * (1.0 + 3.0 * 0.044715 * x * x);
-          dinp[r][c] = dinp[r][c] + local_grad * dout[r][c];
-        }
-      }
-    }
-  }
-  return;
-}
-
-// dqkv += one part of it from `scratch`, for rows [lo, lo + n) of dqkv: each
-// position collects its heads.
-fn k_attention_backward_gather<const R : i32, const C3 : i32, const RA : i32, const T : i32, const C : i32>(
-    dqkv : &mut Tensor<f32, [R, C3], Memory::GPU_HBM>, scratch : &Tensor<f32, [RA, T], Memory::GPU_HBM>,
-    NH : i32, BT : i32, l : i32, part : i32, lo : i32, n : i32) -> void {
-  let hs = C / NH;
-  spawn on(Topology::GPU) {
-    for r in 0..R {
-      if r >= lo && r < lo + n {
-        let rr = r - lo;
-        let b = rr / T;
-        let t = rr % T;
-        for h in 0..NH {
-          let a = l * BT * NH + b * NH * T + h * T + t;
-          for i in 0..hs {
-            dqkv[r][part * C + h * hs + i] = dqkv[r][part * C + h * hs + i] + scratch[a][i];
-          }
+          dinp[r][c] = local_grad * dout[r][c];
         }
       }
     }
@@ -473,15 +653,19 @@ fn k_encoder_backward_wpe<const MAXT : i32, const C : i32, const BT : i32>(
   return;
 }
 
-fn k_adamw<const R : i32, const C : i32>(params : &mut Tensor<f32, [R, C], Memory::GPU_HBM>,
-    grads : &Tensor<f32, [R, C], Memory::GPU_HBM>, ms : &mut Tensor<f32, [R, C], Memory::GPU_HBM>,
+// params, ms and vs are (R, C), the gradients (GR, GC) with the same elements in
+// the same order: the large weights are EW wide here, and their gradients keep
+// the rows that cuBLAS and the encoder kernels write.
+fn k_adamw<const R : i32, const C : i32, const GR : i32, const GC : i32>(params : &mut Tensor<f32, [R, C], Memory::GPU_HBM>,
+    grads : &Tensor<f32, [GR, GC], Memory::GPU_HBM>, ms : &mut Tensor<f32, [R, C], Memory::GPU_HBM>,
     vs : &mut Tensor<f32, [R, C], Memory::GPU_HBM>, learning_rate : f32, beta1 : f32, beta2 : f32,
     eps : f32, weight_decay : f32, beta1_correction : f32, beta2_correction : f32) -> void {
   spawn on(Topology::GPU) {
     for r in 0..R {
       for c in 0..C {
+        let e = r * C + c;
         let param = params[r][c];
-        let g = grads[r][c];
+        let g = grads[e / GC][e % GC];
         let m = beta1 * ms[r][c] + (1.0 - beta1) * g;
         let v = beta2 * vs[r][c] + (1.0 - beta2) * g * g;
         let m_hat = m / beta1_correction;

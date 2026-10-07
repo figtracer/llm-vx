@@ -98,7 +98,9 @@ def main():
         # Downloads come back 48 KB per paid call, so only small text results.
         for remote in ['test_gpu_small.log', 'vx_gpu_train.txt', 'compare_small.txt', 'probe.txt',
                        'kernel_times.txt', 'bench_b4_tf32.log', 'phases_b4.log', 'llmc_cuda.log', 'llmc_cuda_build.log',
-                       'bench_b4_memchr.log', 'phases_b4_memchr.log',
+                       'bench_b4_memchr.log', 'phases_b4_memchr.log', 'widths.txt', 'phases_memchr_b4.log',
+                       'kernel_times_b4.txt', 'kernel_times_memchr_b4.txt',
+                       'serial_kernels.txt', *[f'widths_aw{a}_ew{e}.log' for a, e in ((4, 2), (8, 2), (16, 2), (8, 4))],
                        *[f'vx_{m}.log' for m in ('fp32', 'tf32', 'memchr_fp32', 'memchr_tf32')],
                        *[f'llmc_{p}{v}.log' for p in ('', 'build_') for v in ('tf32', 'fp32')],
                        *[f'bench_b{b}.log' for b in (4, 5, 17, 18)]]:

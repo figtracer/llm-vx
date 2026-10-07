@@ -3,8 +3,8 @@
 import train_gpu;
 
 fn main() -> i32 {
-  // L, NH, C, 3C, 4C, Vp, V, maxT, B, T, B*T, L*B*T, L*B*NH*T, L*C, L*3C, L*4C,
-  // L*B*T*4C/32, B*T*Vp/32
-  return run<2, 4, 64, 192, 256, 512, 500, 64, 4, 64, 256, 512, 2048, 128, 384, 512, 4096, 4096>(1,
+  // L, NH, C, 3C, 4C, Vp, V, maxT, B, T, B*T, L*B*T, L*B*NH*T*T/AW, AW, L*C, L*3C, L*4C,
+  // L*B*T*4C/EW, B*T*Vp/EW, EW, Vp*C/EW, maxT*C/EW, L*3C*C/EW, L*C*C/EW, L*4C*C/EW
+  return run<2, 4, 64, 192, 256, 512, 500, 64, 4, 64, 256, 512, 32768, 4, 128, 384, 512, 65536, 65536, 2, 16384, 2048, 12288, 4096, 16384>(1,
     "build/ref_model.bin", "", "", "build/train_tokens.bin", "build/val_tokens.bin", "build/tokenizer.bin");
 }

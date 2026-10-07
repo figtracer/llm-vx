@@ -1,7 +1,7 @@
 // The C side of gpu.vx: a cuBLAS handle, device pointer offsets (Vx has no
 // pointer arithmetic), zeroing, and host <-> device copies. Built with -DVX_CUDA on a
-// CUDA machine. Without it, "device" memory is host memory and cublasSgemm_v2
-// is a plain loop, so the GPU program runs on a Mac for testing.
+// CUDA machine. Without it, "device" memory is host memory and the cuBLAS calls
+// are plain loops, so the GPU program runs on a Mac for testing.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +93,45 @@ int cublasSgemm_v2(void* handle, int transa, int transb, int m, int n, int k,
             }
             float* c = &C[i + (int64_t)j * ldc];
             *c = *beta == 0.0f ? *alpha * acc : *alpha * acc + *beta * *c;
+        }
+    }
+    return 0;
+}
+
+int cublasSgemmStridedBatched(void* handle, int transa, int transb, int m, int n, int k,
+                              const float* alpha, const float* A, int lda, long long strideA,
+                              const float* B, int ldb, long long strideB, const float* beta,
+                              float* C, int ldc, long long strideC, int batchCount) {
+    for (int b = 0; b < batchCount; b++) {
+        cublasSgemm_v2(handle, transa, transb, m, n, k, alpha, A + b * strideA, lda, B + b * strideB, ldb,
+                       beta, C + b * strideC, ldc);
+    }
+    return 0;
+}
+
+// y = alpha * A x + beta * y, column-major; only op N is used.
+int cublasSgemv_v2(void* handle, int trans, int m, int n, const float* alpha, const float* A, int lda,
+                   const float* x, int incx, const float* beta, float* y, int incy) {
+    (void)handle;
+    (void)trans;
+    for (int i = 0; i < m; i++) {
+        float acc = 0.0f;
+        for (int j = 0; j < n; j++) acc += A[i + (int64_t)j * lda] * x[(int64_t)j * incx];
+        float* yi = &y[(int64_t)i * incy];
+        *yi = *beta == 0.0f ? *alpha * acc : *alpha * acc + *beta * *yi;
+    }
+    return 0;
+}
+
+// C = alpha * A + beta * B, column-major; only op N is used.
+int cublasSgeam(void* handle, int transa, int transb, int m, int n, const float* alpha, const float* A, int lda,
+                const float* beta, const float* B, int ldb, float* C, int ldc) {
+    (void)handle;
+    (void)transa;
+    (void)transb;
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < m; i++) {
+            C[i + (int64_t)j * ldc] = *alpha * A[i + (int64_t)j * lda] + *beta * B[i + (int64_t)j * ldb];
         }
     }
     return 0;
