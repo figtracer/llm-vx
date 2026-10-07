@@ -92,3 +92,23 @@ the same losses, and the time outside kernels and cuBLAS falls from about 212 ms
 Vx's checker counts the peak of live tensors. In these versions a few small buffers that nothing
 reads, 0.87 MB at B=4, are no longer live at the peak, so `make admit` prints slightly lower byte
 counts than the table above; every verdict is the same.
+
+## Against llm.c's CUDA trainer
+
+llm.c's `train_gpt2_fp32.cu` and llm.vx on the same L4, with the same random GPT-2 124M weights and
+tokens, B=4, T=1024 (`gpu-support/jobs/llmc.sh`). llm.c is built with nvcc from NVIDIA's CUDA 12.9
+archives. It turns TF32 on by itself on this GPU, so its FP32 build is a copy with that switched
+off. Mean step time after the first step ([`results/gpu/vs-llmc/`](../results/gpu/vs-llmc)):
+
+| | FP32 | TF32 |
+|---|---:|---:|
+| llm.c | 0.44 s | 0.32 s |
+| llm.vx | 0.95 s | 0.81 s |
+| llm.vx, with Vx's launch fix ([Vx#1331](https://github.com/vx-lang/Vx/issues/1331)) | 0.84 s | 0.66 s |
+
+The dense layers are the same cuBLAS calls in both, about 0.22 s of llm.vx's FP32 step. llm.c also
+hands attention's two products, QKᵀ and att·V, to cuBLAS as batched GEMMs, and reduces each row of
+softmax and layernorm with a warp of 32 threads. llm.vx writes those as Vx kernels with one thread
+per row: about 0.51 s, plus about 0.09 s outside kernels with the launch fix. Calling cuBLAS for
+attention's products, as llm.vx already does for the dense layers, is the next step.
+

@@ -1,0 +1,50 @@
++-----------------------+----------------------------------------------------+
+| Parameter             | Value                                              |
++-----------------------+----------------------------------------------------+
+| train data pattern    | ../rnd124/train_tokens.bin                         |
+| val data pattern      | ../rnd124/val_tokens.bin                           |
+| output log file       | NULL                                               |
+| batch size B          | 4                                                  |
+| sequence length T     | 1024                                               |
+| learning rate         | 0.000300                                           |
+| val_loss_every        | 1000                                               |
+| val_max_steps         | 20                                                 |
+| sample_every          | 1000                                               |
+| genT                  | 64                                                 |
++-----------------------+----------------------------------------------------+
+| device                | NVIDIA L4                                          |
+| TF32                  | disabled                                           |
++-----------------------+----------------------------------------------------+
+| max_sequence_length T | 1024                                               |
+| vocab_size V          | 50257                                              |
+| padded_vocab_size Vp  | 50304                                              |
+| num_layers L          | 12                                                 |
+| num_heads NH          | 12                                                 |
+| channels C            | 768                                                |
+| num_parameters        | 124475904                                          |
++-----------------------+----------------------------------------------------+
+| train_num_batches     | 9                                                  |
+| val_num_batches       | 9                                                  |
++-----------------------+----------------------------------------------------+
+allocated 474 MiB for model parameters
+allocated 5706 MiB for activations
+val loss 10.824906
+allocated 474 MiB for parameter gradients
+allocated 252 MiB for activation gradients
+allocated 474 MiB for AdamW optimizer state m
+allocated 474 MiB for AdamW optimizer state v
+step    1/9: train loss 10.824960 (447.330315 ms, 9156 tok/s)
+step    2/9: train loss 10.824818 (444.943452 ms, 9205 tok/s)
+step    3/9: train loss 10.824903 (438.864222 ms, 9333 tok/s)
+step    4/9: train loss 10.824903 (445.088598 ms, 9202 tok/s)
+step    5/9: train loss 10.824918 (437.361944 ms, 9365 tok/s)
+step    6/9: train loss 10.824818 (445.063576 ms, 9203 tok/s)
+step    7/9: train loss 10.824918 (440.441765 ms, 9299 tok/s)
+step    8/9: train loss 10.825080 (445.854510 ms, 9186 tok/s)
+step    9/9: train loss 10.824858 (441.712972 ms, 9272 tok/s)
+val loss 10.824909
+generating:
+---
+ w11577 w9576 w15625 w45365 w34422 w15472 w14356 w21400 w21261 w33328 w24489 w21640 w38135 w24147 w8887 w17334 w8805 w41369 w13430 w44579 w17760 w1458 w37096 w25165 w2542 w26007 w26619 w41862 w12008 w29461 w4996 w49059 w3385 w9258 w34655 w13536 w549 w7320 w29234 w30708 w42886 w37208 w27933 w43518 w8256 w42135 w20819 w37631 w31709 w6879 w16387 w39344 w5497 w49881 w36666 w42330 w27439 w750 w18053 w43267 w35942 w49559 w24297
+---
+total average iteration time: 442.962373 ms
