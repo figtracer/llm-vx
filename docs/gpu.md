@@ -89,6 +89,7 @@ runs a job again on a kept sandbox.
 | A module `const` or `[R * C]` cannot be a tensor extent ([Vx#1310](https://github.com/vx-lang/Vx/issues/1310)). | 25 shape parameters, written by `entry.py`. |
 | No pointer arithmetic, and no `vxc` flag to link an extra object. | `gpu-support/shim.c` offsets device pointers and copies batches; `CLANG_PATH` links it. |
 | `vx_std_core` does not build on aarch64 Linux ([Vx#1311](https://github.com/vx-lang/Vx/issues/1311)). | Build on x86_64. |
+| f32 `exp` and `tanh` run in f64 on a GPU, and a kernel that calls `math.exp` through a function or inline MLIR runs on one thread ([Vx#1376](https://github.com/vx-lang/Vx/issues/1376)). | `fast_exp!` and `fast_tanh!` macros in `gpu.vx`. |
 
 ## Numerics
 

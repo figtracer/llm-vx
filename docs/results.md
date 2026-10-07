@@ -106,7 +106,8 @@ parallel only if it calls nothing but a few stdlib methods, and a call to a wrap
 inline MLIR, makes the kernel run on one thread, with no warning. So `fast_exp!` is a macro: x
 clamped to [-87, 88], reduced by a whole number m of ln 2, a degree-6 Taylor polynomial and
 `powi` for 2^-m, all allowed. Its error is below 2.5e-7 relative, about what `__expf` gives llm.c,
-which builds with `--use_fast_math`. Vx kernel time per step fell from 235 ms to 144 ms.
+which builds with `--use_fast_math`. Vx kernel time per step fell from 235 ms to 144 ms
+([Vx#1376](https://github.com/vx-lang/Vx/issues/1376)).
 `gpu-support/serial_kernels.py` lists any kernel that would run on one thread.
 
 Where a step goes now ([`phases_b4.log`](../results/gpu/speed/phases_b4.log),
