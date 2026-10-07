@@ -17,11 +17,11 @@ LibDevice path: /opt/cuda/nvvm/libdevice/libdevice.10.bc does not exist or is no
 [JIT] Linking native executable...
 [JIT] Executing native binary...
 [GPT-2 on GPU, train]
-step 0: train loss 10.824956 (took 1159.1236591339111 ms)
-step 1: train loss 10.82474 (took 945.71852684021 ms)
-step 2: train loss 10.824699 (took 944.8316097259521 ms)
-step 3: train loss 10.824813 (took 941.1473274230957 ms)
-step 4: train loss 10.825045 (took 941.0970211029053 ms)
+step 0: train loss 10.824956 (took 1173.3407974243164 ms)
+step 1: train loss 10.82474 (took 945.7507133483887 ms)
+step 2: train loss 10.824699 (took 951.1055946350098 ms)
+step 3: train loss 10.824813 (took 944.9937343597412 ms)
+step 4: train loss 10.825045 (took 953.1333446502686 ms)
 
 [Vx CUDA] staging 154533888 bytes onto topology 500 as device memory, but the program's machine model says the host may read that space (`managed:` is absent or `cached`).
   Nothing here can honour that: this is cudaMalloc memory. A host read of it -- `print` on the result, most likely -- will fault.
